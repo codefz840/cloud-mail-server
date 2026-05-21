@@ -789,8 +789,8 @@ class ImapSession {
       for (let i = this.messages.length - 1; i >= 0; i--) {
         if (requestedUids.includes(this.messages[i].emailId)) {
           this._send(`* ${i + 1} EXPUNGE`);
+          this.pendingDeletes.delete(this.messages[i].emailId);
           this.messages.splice(i, 1);
-          this.pendingDeletes.delete(requestedUids[i]);
         }
       }
     }

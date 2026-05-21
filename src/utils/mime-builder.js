@@ -20,12 +20,14 @@ function encodeMimeHeader(value) {
 
 /**
  * Escape a display-name string for safe inclusion inside an RFC 2822 quoted-string.
- * Backslashes must be escaped before double-quotes to avoid partial sanitization.
+ * Uses a single-pass replacement so that each character is handled exactly once,
+ * avoiding order-dependent double-escaping bugs.
  * @param {string} name
  * @returns {string}
  */
 function escapeDisplayName(name) {
-  return name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  // Escape backslashes and double-quotes in a single pass
+  return name.replace(/[\\"]/g, c => '\\' + c);
 }
 
 /**

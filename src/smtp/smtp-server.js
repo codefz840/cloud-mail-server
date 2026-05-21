@@ -122,7 +122,8 @@ class SmtpBridgeServer {
 
       const subject = parsed.subject || '';
       const text = parsed.text || '';
-      const html = parsed.html || '';
+      // Use html content if available and non-empty, otherwise fall back to plain text
+      const content = (parsed.html && parsed.html.trim()) ? parsed.html : text;
 
       await client.sendEmail({
         accountId: account.accountId,
@@ -130,7 +131,7 @@ class SmtpBridgeServer {
         receiveEmail,
         subject,
         text,
-        content: html || text,
+        content,
         attachments: [],
       });
 
