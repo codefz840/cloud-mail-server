@@ -146,4 +146,31 @@ describe('CloudMailClient API fallback and error handling', () => {
       message: 'POST /login failed: socket hang up | status 502 | {"message":"bad gateway"}',
     });
   });
+
+  test('fetchAllEmails uses account filter when accountId is provided', async () => {
+    axios.mockResolvedValueOnce({
+      data: {
+        code: 200,
+        data: { list: [{ emailId: 1001 }], total: 1, latestEmail: null },
+      },
+    });
+
+    const client = new CloudMailClient('https://mail.example.com');
+    client.token = 'jwt-token';
+    const emails = await client.fetchAllEmails(0, 50, { accountId: 123 });
+
+    expect(emails).toEqual([{ emailId: 1001 }]);
+    expect(axios).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'get',
+        url: 'https://mail.example.com/api/email/list',
+        params: expect.objectContaining({
+          type: 0,
+          size: 50,
+          allReceive: 0,
+          accountId: 123,
+        }),
+      })
+    );
+  });
 });

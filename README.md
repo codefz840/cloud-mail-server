@@ -19,7 +19,7 @@ Email Client ──IMAP/SMTP──▶ cloud-mail-server ──HTTPS──▶ clo
 | **SMTP** | 587 | Send mail via the cloud-mail API |
 
 ### IMAP capabilities
-- **INBOX** folder – received emails (`type=0`)
+- **INBOX** folder – received emails (`type=0`), plus dynamic `INBOX/<address>` subfolders when an account has multiple receive addresses
 - **Sent** folder – sent emails (`type=1`)
 - **Trash** folder – session-local trash (emails moved/copied here are held in memory for the duration of the session; cloud-mail has no native trash concept)
 - `FETCH` with `FLAGS`, `UID`, `INTERNALDATE`, `RFC822.SIZE`, `RFC822`, `ENVELOPE`, `BODY[…]`, `BODYSTRUCTURE`

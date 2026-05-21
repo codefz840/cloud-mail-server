@@ -16,6 +16,7 @@
 const { SMTPServer } = require('smtp-server');
 const { simpleParser } = require('mailparser');
 const CloudMailClient = require('../api/cloud-mail-client');
+const { extractAccountAddresses } = require('../utils/account-addresses');
 
 class SmtpBridgeServer {
   /**
@@ -75,6 +76,16 @@ class SmtpBridgeServer {
   // DATA
   // ---------------------------------------------------------------------------
 
+  _findAccountByAddress(accounts, fromAddress) {
+    const sender = String(fromAddress || '').trim().toLowerCase();
+    if (!Array.isArray(accounts) || accounts.length === 0) return null;
+    if (!sender) return accounts[0];
+
+    return accounts.find(account =>
+      extractAccountAddresses(account).some(addr => addr.toLowerCase() === sender)
+    ) || accounts[0];
+  }
+
   async _onData(stream, session, callback) {
     let rawEmail;
     try {
@@ -102,9 +113,7 @@ class SmtpBridgeServer {
         : session.username;
 
       const accounts = await client.listAccounts();
-      const account = accounts.find(
-        a => a.email && a.email.toLowerCase() === (fromAddress || '').toLowerCase()
-      ) || accounts[0];
+      const account = this._findAccountByAddress(accounts, fromAddress);
 
       if (!account) {
         return callback(new Error('No matching account found for sender ' + fromAddress));
