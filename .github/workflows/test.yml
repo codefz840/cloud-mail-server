@@ -47,13 +47,18 @@ jobs:
             echo "resolvectl not available; using /etc/resolv.conf fallback"
           fi
 
-          if [ "$use_resolv_conf_fallback" = "true" ] && ! grep -q '^nameserver 1.1.1.1$' /etc/resolv.conf; then
+          if [ "$use_resolv_conf_fallback" = "true" ]; then
             tmp_resolv="$(mktemp)"
             {
               echo 'nameserver 1.1.1.1'
               echo 'nameserver 1.0.0.1'
-              cat /etc/resolv.conf
-            } | awk '!seen[$0]++' > "$tmp_resolv"
+              awk '{
+                if ($1 == "nameserver" && ($2 == "1.1.1.1" || $2 == "1.0.0.1")) {
+                  next
+                }
+                print
+              }' /etc/resolv.conf
+            } > "$tmp_resolv"
             sudo cp "$tmp_resolv" /etc/resolv.conf
             rm -f "$tmp_resolv"
           fi
