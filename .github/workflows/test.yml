@@ -29,18 +29,30 @@ jobs:
       - name: Configure DNS resolver
         run: |
           if command -v resolvectl >/dev/null 2>&1; then
-            dns_link="$(resolvectl status | awk '/^Link [0-9]+ \(/ {gsub(/[()]/, "", $3); link=$3} /Current Scopes:.*DNS/ {print link; exit}')"
+            dns_link="$(ip route | awk '/^default/ {print $5; exit}')"
             if [ -n "$dns_link" ]; then
-              sudo resolvectl dns "$dns_link" 1.1.1.1 1.0.0.1
-              sudo resolvectl flush-caches
+              echo "Configuring resolvectl on link: $dns_link"
+              if sudo resolvectl dns "$dns_link" 1.1.1.1 1.0.0.1; then
+                sudo resolvectl flush-caches
+              else
+                echo "resolvectl DNS configuration failed; using /etc/resolv.conf fallback"
+              fi
+            else
+              echo "No default route interface found; using /etc/resolv.conf fallback"
             fi
+          else
+            echo "resolvectl not available; using /etc/resolv.conf fallback"
           fi
 
           if ! grep -q '^nameserver 1.1.1.1$' /etc/resolv.conf; then
-            sudo sh -c 'cat <<EOF >/etc/resolv.conf
-            nameserver 1.1.1.1
-            nameserver 1.0.0.1
-            EOF'
+            tmp_resolv="$(mktemp)"
+            {
+              echo 'nameserver 1.1.1.1'
+              echo 'nameserver 1.0.0.1'
+              cat /etc/resolv.conf
+            } | awk '!seen[$0]++' > "$tmp_resolv"
+            sudo cp "$tmp_resolv" /etc/resolv.conf
+            rm -f "$tmp_resolv"
           fi
 
       - name: Validate integration environment
