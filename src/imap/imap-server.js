@@ -34,6 +34,7 @@
  *   - No TLS support built-in; use a TLS reverse-proxy for encrypted access.
  */
 
+const { simpleParser } = require('mailparser');
 const net = require('net');
 const {
   buildMime,
@@ -211,6 +212,84 @@ function parseMailboxName(raw) {
   return (quoted ? quoted[1] : s).trim();
 }
 
+function decodeImapAString(token) {
+  const s = String(token || '').trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    const inner = s.slice(1, -1);
+    return inner.replace(/\\([\\"])/g, '$1');
+  }
+  return s;
+}
+
+function parseListLikeArgs(args) {
+  const input = String(args || '').trim();
+  if (!input) return null;
+
+  const tokens = [];
+  let i = 0;
+  while (i < input.length && tokens.length < 2) {
+    while (i < input.length && input[i] === ' ') i++;
+    if (i >= input.length) break;
+
+    if (input[i] === '"') {
+      let token = '"';
+      i += 1;
+      let closed = false;
+      while (i < input.length) {
+        const ch = input[i];
+        token += ch;
+        i += 1;
+        if (ch === '\\' && i < input.length) {
+          token += input[i];
+          i += 1;
+          continue;
+        }
+        if (ch === '"') {
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) return null;
+      tokens.push(token);
+      continue;
+    }
+
+    const start = i;
+    while (i < input.length && input[i] !== ' ') i++;
+    tokens.push(input.slice(start, i));
+  }
+
+  if (tokens.length !== 2) return null;
+
+  return {
+    referenceName: decodeImapAString(tokens[0]),
+    mailboxPattern: decodeImapAString(tokens[1]),
+  };
+}
+
+function imapPatternToRegex(pattern, delimiter = '/') {
+  const escapedDelimiter = delimiter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let out = '^';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '*') {
+      out += '.*';
+    } else if (ch === '%') {
+      out += `[^${escapedDelimiter}]*`;
+    } else {
+      out += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  out += '$';
+  return new RegExp(out, 'i');
+}
+
+function matchesListPattern(name, pattern) {
+  if (pattern === '' || pattern == null) return false;
+  const re = imapPatternToRegex(pattern, '/');
+  return re.test(name);
+}
+
 // ---------------------------------------------------------------------------
 // ImapSession
 // ---------------------------------------------------------------------------
@@ -234,6 +313,7 @@ class ImapSession {
     /** cloud-mail type for selected folder (0=INBOX, 1=Sent, 'trash') */
     this.selectedType = null;
     this.selectedMailboxKey = null;
+    this.selectedAccountId = null;
 
     /**
      * Session-local Trash store.
@@ -253,12 +333,18 @@ class ImapSession {
     this._authContinuation = null;
     /** Tag saved when entering IDLE state, used to send the tagged OK on DONE */
     this._idleTag = null;
+    /**
+     * Set while consuming an APPEND literal: { tag, mailbox, charsLeft, data }
+     * _onData accumulates exactly charsLeft bytes in data buffer.
+     */
+    this._literalMode = null;
 
     socket.setEncoding('utf8');
     socket.on('data', (data) => this._onData(data));
     socket.on('close', () => this._onClose());
     socket.on('error', (err) => {
-      if (err.code !== 'ECONNRESET') {
+      // ECONNRESET / EPIPE are normal client-side disconnects; suppress them.
+      if (err.code !== 'ECONNRESET' && err.code !== 'EPIPE') {
         console.error('[IMAP] socket error:', err.message);
       }
     });
@@ -280,10 +366,37 @@ class ImapSession {
   _no(tag, msg) { this._send(`${tag} NO ${msg}`); }
   _bad(tag, msg) { this._send(`${tag} BAD ${msg}`); }
 
+  async _refreshSelectedMailbox(source = 'unknown') {
+    if (this.state !== 'SELECTED') return;
+
+    if (this.selectedType === 'trash') {
+      this.messages = [...this.trashMessages];
+      return;
+    }
+
+    const refreshed = await this.client.fetchAllEmails(this.selectedType, 500, {
+      accountId: this.selectedAccountId,
+    });
+    this.messages = refreshed.sort((a, b) => a.emailId - b.emailId);
+    console.log(`[IMAP][sync] ${source}: refreshed ${this.selectedMailboxKey}, count=${this.messages.length}`);
+  }
+
+  async _cmdNoop(tag) {
+    if (this.state === 'SELECTED') {
+      try {
+        await this._refreshSelectedMailbox('NOOP');
+      } catch (err) {
+        console.error('[IMAP] NOOP refresh failed:', err.message);
+      }
+    }
+    this._ok(tag, 'NOOP completed');
+  }
+
   async _listAddressMailboxes() {
     let accounts = [];
     try {
       accounts = await this.client.listAccounts();
+      console.log(`[IMAP][debug] listAccounts returned ${accounts.length} account(s)`);
     } catch (err) {
       console.error('[IMAP] listAccounts failed:', err.message);
     }
@@ -302,6 +415,7 @@ class ImapSession {
     }
 
     dynamic.sort((a, b) => a.name.localeCompare(b.name));
+    console.log(`[IMAP][debug] dynamic address mailboxes: ${dynamic.map(box => box.name).join(', ') || '(none)'}`);
     return dynamic;
   }
 
@@ -327,19 +441,46 @@ class ImapSession {
       { attrs: '(\\HasNoChildren \\Sent)', name: 'Sent' },
       { attrs: '(\\HasNoChildren \\Trash)', name: 'Trash' },
     ];
+    console.log(`[IMAP][debug] LIST base mailboxes prepared: ${list.map(box => box.name).join(', ')}`);
     return list;
   }
 
   _onData(data) {
     this._buffer += data;
-    // IMAP (RFC 3501 §2.2) mandates CRLF line endings from clients.
-    // We split on CRLF here; a bare LF from a non-conformant client
-    // will remain in the buffer until the next CRLF arrives.
-    const lines = this._buffer.split('\r\n');
-    this._buffer = lines.pop(); // incomplete line stays in buffer
 
-    for (const line of lines) {
+    while (true) {
+      // Consume APPEND literal data (RFC 3501 §6.3.11).
+      // Literal bytes may contain CRLF, so this must happen before line parsing.
+      if (this._literalMode) {
+        const needed = this._literalMode.charsLeft;
+        if (this._buffer.length < needed) {
+          // Still waiting for more literal bytes – accumulate what we have.
+          this._literalMode.data += this._buffer;
+          this._literalMode.charsLeft -= this._buffer.length;
+          this._buffer = '';
+          return;
+        }
+
+        // Received all literal bytes – extract and process (fire-and-forget).
+        this._literalMode.data += this._buffer.slice(0, needed);
+        this._buffer = this._buffer.slice(needed);
+        const mode = this._literalMode;
+        this._literalMode = null;
+        this._processAppendLiteral(mode).catch(err => {
+          console.error('[IMAP] APPEND processing failed:', err.message);
+        });
+        continue;
+      }
+
+      // Parse one command line at a time to interleave correctly with literal mode.
+      const eolIndex = this._buffer.indexOf('\r\n');
+      if (eolIndex === -1) return;
+
+      const line = this._buffer.slice(0, eolIndex);
+      this._buffer = this._buffer.slice(eolIndex + 2);
+
       if (line.length === 0) continue;
+
       this._dispatch(line).catch(err => {
         console.error('[IMAP] unhandled error:', err);
       });
@@ -384,7 +525,7 @@ class ImapSession {
     try {
       switch (command) {
         case 'CAPABILITY': this._cmdCapability(tag); break;
-        case 'NOOP':       this._ok(tag, 'NOOP completed'); break;
+        case 'NOOP':       await this._cmdNoop(tag); break;
         case 'LOGOUT':     await this._cmdLogout(tag); break;
         case 'LOGIN':      await this._cmdLogin(tag, rest); break;
         case 'AUTHENTICATE': await this._cmdAuthenticate(tag, rest); break;
@@ -398,7 +539,8 @@ class ImapSession {
         case 'COPY':       await this._cmdCopy(tag, rest, false); break;
         case 'MOVE':       await this._cmdMove(tag, rest, false); break;
         case 'EXPUNGE':    await this._cmdExpunge(tag); break;
-        case 'SEARCH':     this._cmdSearch(tag, rest); break;
+        case 'SEARCH':     await this._cmdSearch(tag, rest); break;
+        case 'CHECK':      await this._cmdCheck(tag); break;
         case 'CLOSE':      await this._cmdClose(tag); break;
         case 'UID': {
           const sub = rest.match(/^(\S+)(.*)?$/);
@@ -411,11 +553,12 @@ class ImapSession {
             case 'COPY':    await this._cmdCopy(tag, subArgs, true); break;
             case 'MOVE':    await this._cmdMove(tag, subArgs, true); break;
             case 'EXPUNGE': await this._cmdUidExpunge(tag, subArgs); break;
-            case 'SEARCH':  this._cmdSearch(tag, subArgs, true); break;
+            case 'SEARCH':  await this._cmdSearch(tag, subArgs, true); break;
             default: this._bad(tag, `Unknown UID sub-command: ${subCmd}`);
           }
           break;
         }
+        case 'APPEND':  await this._cmdAppend(tag, rest); break;
         case 'IDLE': {
           // Minimal IDLE: acknowledge and wait for DONE (RFC 2177)
           this._idleTag = tag;
@@ -540,23 +683,59 @@ class ImapSession {
       return;
     }
 
+    const parsed = parseListLikeArgs(args);
+    if (!parsed) {
+      this._bad(tag, 'Syntax: LIST reference mailbox-pattern');
+      return;
+    }
+
+    const { mailboxPattern } = parsed;
+    console.log(`[IMAP][debug] LIST pattern=${JSON.stringify(mailboxPattern)} rawArgs=${JSON.stringify(args)}`);
+    if (mailboxPattern === '') {
+      this._send('* LIST (\\Noselect) "/" ""');
+      this._ok(tag, 'LIST completed');
+      return;
+    }
+
     const mailboxes = await this._buildListMailboxes();
+    const matched = [];
     for (const mailbox of mailboxes) {
+      if (!matchesListPattern(mailbox.name, mailboxPattern)) continue;
+      matched.push(mailbox.name);
       this._send(`* LIST ${mailbox.attrs} "/" ${q(mailbox.name)}`);
     }
+    console.log(`[IMAP][debug] LIST matched ${matched.length} mailbox(es): ${matched.join(', ') || '(none)'}`);
     this._ok(tag, 'LIST completed');
   }
 
-  async _cmdLsub(tag) {
+  async _cmdLsub(tag, args) {
     if (this.state === 'NOT_AUTHENTICATED') {
       this._no(tag, 'Not authenticated');
       return;
     }
 
+    const parsed = parseListLikeArgs(args);
+    if (!parsed) {
+      this._bad(tag, 'Syntax: LSUB reference mailbox-pattern');
+      return;
+    }
+
+    const { mailboxPattern } = parsed;
+    console.log(`[IMAP][debug] LSUB pattern=${JSON.stringify(mailboxPattern)} rawArgs=${JSON.stringify(args)}`);
+    if (mailboxPattern === '') {
+      this._send('* LSUB (\\Noselect) "/" ""');
+      this._ok(tag, 'LSUB completed');
+      return;
+    }
+
     const mailboxes = await this._buildListMailboxes();
+    const matched = [];
     for (const mailbox of mailboxes) {
+      if (!matchesListPattern(mailbox.name, mailboxPattern)) continue;
+      matched.push(mailbox.name);
       this._send(`* LSUB ${mailbox.attrs} "/" ${q(mailbox.name)}`);
     }
+    console.log(`[IMAP][debug] LSUB matched ${matched.length} mailbox(es): ${matched.join(', ') || '(none)'}`);
     this._ok(tag, 'LSUB completed');
   }
 
@@ -580,6 +759,7 @@ class ImapSession {
     this.readOnly = readOnly;
     this.selectedType = mailbox.type;
     this.selectedMailboxKey = mailbox.key;
+    this.selectedAccountId = mailbox.accountId;
     this.pendingDeletes.clear();
 
     // Fetch emails from cloud-mail (or use session-local Trash store)
@@ -635,14 +815,16 @@ class ImapSession {
     }
 
     let messages;
-    if (this.selectedMailboxKey === mailbox.key) {
-      messages = this.messages;
-    } else if (mailbox.type === 'trash') {
+    if (mailbox.type === 'trash') {
       messages = this.trashMessages;
     } else {
       messages = await this.client.fetchAllEmails(mailbox.type, 500, {
         accountId: mailbox.accountId,
       });
+      // Keep selected mailbox cache aligned with latest API snapshot.
+      if (this.selectedMailboxKey === mailbox.key) {
+        this.messages = [...messages].sort((a, b) => a.emailId - b.emailId);
+      }
     }
 
     const total = messages.length;
@@ -673,6 +855,13 @@ class ImapSession {
     if (this.state !== 'SELECTED') {
       this._no(tag, 'No mailbox selected');
       return;
+    }
+
+    try {
+      await this._refreshSelectedMailbox(byUid ? 'UID FETCH' : 'FETCH');
+    } catch (err) {
+      console.error('[IMAP] FETCH refresh failed:', err.message);
+      // Fall back to cached messages
     }
 
     const m = args.match(/^(\S+)\s+(.+)$/s);
@@ -717,7 +906,11 @@ class ImapSession {
       for (const item of items) {
         const val = this._buildFetchItem(item, msg, raw, rawBuf);
         if (val !== null) {
-          parts.push(`${item} ${val}`);
+          // RFC 3501 §6.4.5: server response always uses BODY[...], never BODY.PEEK[...]
+          const responseKey = item.startsWith('BODY.PEEK[')
+            ? 'BODY[' + item.slice('BODY.PEEK['.length)
+            : item;
+          parts.push(`${responseKey} ${val}`);
         }
       }
 
@@ -848,6 +1041,13 @@ class ImapSession {
     if (this.readOnly) {
       this._no(tag, '[READ-ONLY] Mailbox is read-only');
       return;
+    }
+
+    try {
+      await this._refreshSelectedMailbox(byUid ? 'UID STORE' : 'STORE');
+    } catch (err) {
+      console.error('[IMAP] STORE refresh failed:', err.message);
+      // Fall back to cached messages
     }
 
     // STORE sequence FLAGS|+FLAGS|-FLAGS (\Deleted) etc.
@@ -1026,10 +1226,17 @@ class ImapSession {
   // SEARCH / UID SEARCH
   // -------------------------------------------------------------------------
 
-  _cmdSearch(tag, args, byUid = false) {
+  async _cmdSearch(tag, args, byUid = false) {
     if (this.state !== 'SELECTED') {
       this._no(tag, 'No mailbox selected');
       return;
+    }
+
+    try {
+      await this._refreshSelectedMailbox(byUid ? 'UID SEARCH' : 'SEARCH');
+    } catch (err) {
+      console.error('[IMAP] SEARCH refresh failed:', err.message);
+      // Fall back to cached messages
     }
 
     // NOTE: SEARCH criteria are intentionally not evaluated.
@@ -1046,6 +1253,26 @@ class ImapSession {
 
     this._send(`* SEARCH ${results}`);
     this._ok(tag, 'SEARCH completed');
+  }
+
+  // -------------------------------------------------------------------------
+  // CHECK
+  // -------------------------------------------------------------------------
+
+  async _cmdCheck(tag) {
+    if (this.state !== 'SELECTED') {
+      this._no(tag, 'No mailbox selected');
+      return;
+    }
+
+    try {
+      await this._refreshSelectedMailbox('CHECK');
+    } catch (err) {
+      console.error('[IMAP] CHECK refresh failed:', err.message);
+    }
+
+    // No-op checkpoint for compatibility with clients like Thunderbird.
+    this._ok(tag, 'CHECK completed');
   }
 
   // -------------------------------------------------------------------------
@@ -1220,6 +1447,82 @@ class ImapSession {
   // -------------------------------------------------------------------------
   // CLOSE
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // APPEND (RFC 3501 §6.3.11)
+  // -------------------------------------------------------------------------
+
+  /**
+   * APPEND – accept and discard the literal message.
+   * cloud-mail already stores sent emails when the SMTP bridge calls
+   * /email/send, so we do not need to persist the copy ourselves.
+   * We consume the exact literal byte count and respond OK so that
+   * Thunderbird / other clients do not show an error.
+   */
+  async _cmdAppend(tag, args) {
+    if (this.state === 'NOT_AUTHENTICATED') {
+      this._no(tag, 'Not authenticated');
+      return;
+    }
+
+    // Expect: APPEND mailbox [flags] [date] {N}
+    const literalMatch = args.match(/^\s*"?([^"\s]+)"?(.*?)\{(\d+)(\+)?\}\s*$/);
+    if (!literalMatch) {
+      this._bad(tag, 'Syntax: APPEND mailbox [flags] [date] {size}');
+      return;
+    }
+
+    const mailbox = parseMailboxName(literalMatch[1]);
+    const size = parseInt(literalMatch[3], 10);
+    const nonSyncLiteral = Boolean(literalMatch[4]);
+    console.log(`[IMAP] APPEND: mailbox=${mailbox} size=${size} bytes`);
+    this._literalMode = { tag, mailbox, charsLeft: size, data: '' };
+    if (!nonSyncLiteral) {
+      this._send('+ Ready for literal data');
+    }
+  }
+
+  async _processAppendLiteral(mode) {
+    const { tag, mailbox, data } = mode;
+    
+    // APPEND "Sent" – save to cloud-mail API
+    if (mailbox.toUpperCase() === 'SENT' && this.client.token) {
+      try {
+        const accounts = await this.client.listAccounts();
+        const primaryAccount = accounts && accounts.length > 0 ? accounts[0] : null;
+        
+        if (primaryAccount) {
+          console.log(`[IMAP] APPEND Sent: saving ${data.length}-byte MIME to account ${primaryAccount.accountId}`);
+          await this.client.appendEmail({
+            accountId: primaryAccount.accountId,
+            type: 1,  // sent emails
+            raw: data,
+          });
+          
+          // Refresh message cache so new email appears in FETCH
+          if (this.selectedType === 1) {  // currently viewing Sent
+            try {
+              const refreshed = await this.client.fetchAllEmails(1, 500, {
+                accountId: primaryAccount.accountId,
+              });
+              this.messages = refreshed.sort((a, b) => a.emailId - b.emailId);
+              console.log(`[IMAP] APPEND Sent: refreshed, now ${this.messages.length} messages`);
+            } catch (err) {
+              console.error(`[IMAP] APPEND Sent refresh failed:`, err.message);
+            }
+          }
+          
+          this._ok(tag, '[APPENDUID 1 1] APPEND completed');
+          return;
+        }
+      } catch (err) {
+        console.error(`[IMAP] APPEND Sent appendEmail failed:`, err.message);
+      }
+    }
+
+    // For other mailboxes, just discard silently (backward compat with trash handling)
+    this._ok(tag, '[APPENDUID 1 1] APPEND completed');
+  }
+
   async _cmdClose(tag) {
     if (this.state !== 'SELECTED') {
       this._no(tag, 'No mailbox selected');
@@ -1256,13 +1559,18 @@ class ImapServer {
    */
   constructor(cloudMailUrl) {
     this.cloudMailUrl = cloudMailUrl;
+    this.sockets = new Set();
     this.server = net.createServer(socket => this._onConnection(socket));
   }
 
   _onConnection(socket) {
     const remote = `${socket.remoteAddress}:${socket.remotePort}`;
     console.log(`[IMAP] connection from ${remote}`);
-    socket.on('close', () => console.log(`[IMAP] ${remote} disconnected`));
+    this.sockets.add(socket);
+    socket.on('close', () => {
+      this.sockets.delete(socket);
+      console.log(`[IMAP] ${remote} disconnected`);
+    });
     new ImapSession(socket, this.cloudMailUrl);
   }
 
@@ -1283,7 +1591,29 @@ class ImapServer {
   }
 
   close() {
-    return new Promise(resolve => this.server.close(resolve));
+    return new Promise(resolve => {
+      let resolved = false;
+
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        resolve();
+      };
+
+      const timer = setTimeout(() => {
+        for (const socket of this.sockets) {
+          socket.destroy();
+        }
+        finish();
+      }, 1500);
+
+      this.server.close(() => finish());
+
+      for (const socket of this.sockets) {
+        socket.end();
+      }
+    });
   }
 }
 

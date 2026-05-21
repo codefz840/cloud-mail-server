@@ -299,6 +299,24 @@ class CloudMailClient {
     }
     return body.data;
   }
+
+  /**
+   * Append (store) a raw MIME email to a mailbox.
+   * Used for IMAP APPEND to save sent emails.
+   *
+   * @param {Object} params
+   * @param {number}   params.accountId     Account ID
+   * @param {number}   params.type          0 = inbox, 1 = sent
+   * @param {string}   params.raw           Raw MIME message
+   * @returns {Promise<Object>} Appended email object
+   */
+  async appendEmail(params) {
+    const body = await this._post('/email/append', params);
+    if (!body || body.code !== 200) {
+      throw new Error('appendEmail failed: ' + JSON.stringify(body));
+    }
+    return body.data;
+  }
 }
 
 module.exports = CloudMailClient;

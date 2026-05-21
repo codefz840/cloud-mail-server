@@ -31,6 +31,12 @@ class SmtpBridgeServer {
       allowInsecureAuth: true,
       disabledCommands: ['STARTTLS'],
 
+      // Log new connections
+      onConnect: (session, callback) => {
+        console.log(`[SMTP] connection from ${session.remoteAddress}`);
+        callback();
+      },
+
       // Authenticate against cloud-mail
       onAuth: (auth, session, callback) => this._onAuth(auth, session, callback),
 
@@ -39,6 +45,9 @@ class SmtpBridgeServer {
 
       // Process incoming email data
       onData: (stream, session, callback) => this._onData(stream, session, callback),
+
+      // Keep shutdown snappy on SIGINT/SIGTERM with active SMTP sessions.
+      closeTimeout: 1500,
 
       logger: false,
     });
@@ -60,14 +69,17 @@ class SmtpBridgeServer {
       return callback(new Error('Username and password required'));
     }
 
+    console.log(`[SMTP] auth attempt: ${username}`);
     try {
       const client = new CloudMailClient(this.cloudMailUrl);
       await client.login(username, password);
       // Store the authenticated client on the session for use in _onData
       session.cloudMailClient = client;
       session.username = username;
+      console.log(`[SMTP] authenticated: ${username}`);
       callback(null, { user: username });
     } catch (err) {
+      console.error(`[SMTP] auth failed for ${username}:`, err.message);
       callback(new Error('Authentication failed: ' + err.message));
     }
   }
@@ -134,6 +146,7 @@ class SmtpBridgeServer {
       // Use html content if available and non-empty, otherwise fall back to plain text
       const content = (parsed.html && parsed.html.trim()) ? parsed.html : text;
 
+      console.log(`[SMTP] sending from=${fromAddress} to=${receiveEmail.join(',')} subject=${JSON.stringify(subject)}`);
       await client.sendEmail({
         accountId: account.accountId,
         name: account.name || fromAddress,
@@ -143,6 +156,7 @@ class SmtpBridgeServer {
         content,
         attachments: [],
       });
+      console.log(`[SMTP] delivered: from=${fromAddress} to=${receiveEmail.join(',')}`);
 
       callback(); // success
     } catch (err) {
