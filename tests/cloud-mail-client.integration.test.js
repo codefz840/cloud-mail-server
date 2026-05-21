@@ -29,7 +29,7 @@ describeIfConfigured('CloudMailClient integration', () => {
   let sentEmailId;
   let inboxEmailId;
 
-  async function fetchEmailBySubject(type) {
+  async function fetchEmailBySubject(type, subject) {
     const emails = await client.fetchAllEmails(type, 100);
     return emails.find(email => email.subject === subject);
   }
@@ -90,14 +90,14 @@ describeIfConfigured('CloudMailClient integration', () => {
     expect(sentEmail).toBeTruthy();
 
     const inboxEmail = await waitFor(
-      () => fetchEmailBySubject(0),
+      () => fetchEmailBySubject(0, subject),
       `Timed out waiting for inbox email "${subject}"`
     );
     inboxEmailId = inboxEmail.emailId;
     expect(inboxEmailId).toBeDefined();
 
     const sentCopy = await waitFor(
-      () => fetchEmailBySubject(1),
+      () => fetchEmailBySubject(1, subject),
       `Timed out waiting for sent email "${subject}"`
     );
     sentEmailId = sentCopy.emailId;
@@ -107,7 +107,7 @@ describeIfConfigured('CloudMailClient integration', () => {
 
     const readInboxEmail = await waitFor(
       async () => {
-        const email = await fetchEmailBySubject(0);
+        const email = await fetchEmailBySubject(0, subject);
         return email && email.unread === 0 ? email : null;
       },
       `Timed out waiting for inbox email "${subject}" to be marked as read`
@@ -121,7 +121,7 @@ describeIfConfigured('CloudMailClient integration', () => {
 
     await waitFor(
       async () => {
-        const email = await fetchEmailBySubject(0);
+        const email = await fetchEmailBySubject(0, subject);
         return email ? null : true;
       },
       `Timed out waiting for inbox email "${subject}" to be deleted`
@@ -129,7 +129,7 @@ describeIfConfigured('CloudMailClient integration', () => {
 
     await waitFor(
       async () => {
-        const email = await fetchEmailBySubject(1);
+        const email = await fetchEmailBySubject(1, subject);
         return email ? null : true;
       },
       `Timed out waiting for sent email "${subject}" to be deleted`
