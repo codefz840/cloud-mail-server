@@ -24,11 +24,6 @@ async function waitFor(fn, message, attempts = 12, delayMs = 5000) {
 describeIfConfigured('CloudMailClient integration', () => {
   jest.setTimeout(120000);
 
-  const uniqueId = crypto.randomUUID();
-  const subject = `[cloud-mail-server] integration ${uniqueId}`;
-  const text = `integration test ${uniqueId}`;
-  const html = `<p>${text}</p>`;
-
   let client;
   let account;
   let sentEmailId;
@@ -55,6 +50,11 @@ describeIfConfigured('CloudMailClient integration', () => {
   });
 
   test('covers login, account, email, read, delete, and logout flows', async () => {
+    const uniqueId = crypto.randomUUID();
+    const subject = `[cloud-mail-server] integration ${uniqueId}`;
+    const text = `integration test ${uniqueId}`;
+    const html = `<p>${text}</p>`;
+
     client = new CloudMailClient(process.env.CLOUD_MAIL_URL);
 
     const token = await client.login(process.env.TEST_MAIL_USER, process.env.TEST_MAIL_PASS);

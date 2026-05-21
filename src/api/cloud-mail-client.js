@@ -23,9 +23,9 @@ class CloudMailClient {
     return { Authorization: `Bearer ${this.token}` };
   }
 
-  _buildRequestError(action, error) {
+  _buildRequestError(requestDescription, error) {
     if (!error || typeof error !== 'object') {
-      return new Error(`${action} failed`);
+      return new Error(`${requestDescription} failed`);
     }
 
     const parts = [];
@@ -51,14 +51,14 @@ class CloudMailClient {
       }
     }
 
-    return new Error(`${action} failed: ${parts.join(' | ') || 'request error'}`);
+    return new Error(`${requestDescription} failed: ${parts.join(' | ') || 'request error'}`);
   }
 
-  async _request(action, fn) {
+  async _request(requestDescription, fn) {
     try {
       return await fn();
     } catch (error) {
-      throw this._buildRequestError(action, error);
+      throw this._buildRequestError(requestDescription, error);
     }
   }
 
