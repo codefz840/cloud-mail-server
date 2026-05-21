@@ -18,7 +18,9 @@ class CloudMailClient {
     this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
     // Fallback for deployments exposing legacy root routes.
     this.fallbackBaseUrl = hasApiSuffix
-      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
+      ? (this.baseUrl.length > API_PATH_SUFFIX.length
+        ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
+        : this.baseUrl)
       : this.baseUrl;
     this.fallbackEnabled = !hasApiSuffix && this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;

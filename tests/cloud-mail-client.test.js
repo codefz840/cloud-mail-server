@@ -42,6 +42,32 @@ describe('CloudMailClient API behavior', () => {
     );
   });
 
+  test('login retries from /api/login to /login on 404', async () => {
+    axios
+      .mockRejectedValueOnce(createHttpError(404))
+      .mockResolvedValueOnce({ data: { code: 200, data: { token: 'jwt-token' } } });
+
+    const client = new CloudMailClient('https://mail.example.com');
+    const token = await client.login('admin@example.com', 'secret');
+
+    expect(token).toBe('jwt-token');
+    expect(axios).toHaveBeenCalledTimes(2);
+    expect(axios).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        method: 'post',
+        url: 'https://mail.example.com/api/login',
+      })
+    );
+    expect(axios).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        method: 'post',
+        url: 'https://mail.example.com/login',
+      })
+    );
+  });
+
   test('login does not retry on 401', async () => {
     axios.mockRejectedValueOnce(createHttpError(401));
 
