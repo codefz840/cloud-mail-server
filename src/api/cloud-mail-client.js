@@ -20,7 +20,7 @@ class CloudMailClient {
     this.fallbackBaseUrl = hasApiSuffix
       ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
       : this.baseUrl;
-    this.fallbackEnabled = this.fallbackBaseUrl !== this.apiBaseUrl;
+    this.fallbackEnabled = !hasApiSuffix && this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }
 
@@ -43,7 +43,7 @@ class CloudMailClient {
     }
 
     const status = error.response && error.response.status;
-    if (status) {
+    if (status && (!error.message || !error.message.includes(String(status)))) {
       parts.push(`status ${status}`);
     }
 

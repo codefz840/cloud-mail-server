@@ -47,7 +47,7 @@ describe('CloudMailClient API behavior', () => {
 
     const client = new CloudMailClient('https://mail.example.com');
     await expect(client.login('admin@example.com', 'bad-password')).rejects.toMatchObject({
-      message: 'POST /login failed: HTTP 401 | status 401',
+      message: 'POST /login failed: HTTP 401',
     });
     expect(axios).toHaveBeenCalledTimes(1);
   });
@@ -94,6 +94,16 @@ describe('CloudMailClient API behavior', () => {
         url: 'https://mail.example.com/api/login',
       })
     );
+  });
+
+  test('base URL already ending with /api does not fall back to root routes', async () => {
+    axios.mockRejectedValueOnce(createHttpError(405));
+
+    const client = new CloudMailClient('https://mail.example.com/api');
+    await expect(client.login('admin@example.com', 'secret')).rejects.toMatchObject({
+      message: 'POST /login failed: HTTP 405',
+    });
+    expect(axios).toHaveBeenCalledTimes(1);
   });
 
   test('wraps Axios-style circular login failures in a serializable error', async () => {
