@@ -26,6 +26,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Configure DNS resolver
+        run: |
+          sudo sh -c 'cat <<EOF >/etc/resolv.conf
+          nameserver 1.1.1.1
+          nameserver 1.0.0.1
+          EOF'
+
       - name: Validate integration environment
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
