@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const API_PATH_SUFFIX = '/api';
 
 /**
  * HTTP client that wraps the cloud-mail REST API.
@@ -12,6 +13,14 @@ class CloudMailClient {
    */
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
+    const hasApiSuffix = this.baseUrl.endsWith(API_PATH_SUFFIX);
+    // Prefer modern worker routes under /api.
+    this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
+    // Fallback for deployments exposing legacy root routes.
+    this.fallbackBaseUrl = hasApiSuffix
+      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
+      : this.baseUrl;
+    this.fallbackEnabled = this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }
 
@@ -23,34 +32,45 @@ class CloudMailClient {
     return { Authorization: `Bearer ${this.token}` };
   }
 
+  _shouldRetryWithFallback(err) {
+    const status = err && err.response && err.response.status;
+    return (status === 404 || status === 405) && this.fallbackEnabled;
+  }
+
+  async _request(method, path, { params, data, includeAuth = true } = {}) {
+    const makeRequest = async (baseUrl) => {
+      const res = await axios({
+        method,
+        url: `${baseUrl}${path}`,
+        headers: includeAuth ? this._authHeaders() : undefined,
+        params,
+        data,
+      });
+      return res.data;
+    };
+
+    try {
+      return await makeRequest(this.apiBaseUrl);
+    } catch (err) {
+      if (!this._shouldRetryWithFallback(err)) throw err;
+      return await makeRequest(this.fallbackBaseUrl);
+    }
+  }
+
   async _get(path, params = {}) {
-    const res = await axios.get(`${this.baseUrl}${path}`, {
-      headers: this._authHeaders(),
-      params,
-    });
-    return res.data;
+    return this._request('get', path, { params });
   }
 
   async _post(path, data = {}) {
-    const res = await axios.post(`${this.baseUrl}${path}`, data, {
-      headers: this._authHeaders(),
-    });
-    return res.data;
+    return this._request('post', path, { data });
   }
 
   async _put(path, data = {}) {
-    const res = await axios.put(`${this.baseUrl}${path}`, data, {
-      headers: this._authHeaders(),
-    });
-    return res.data;
+    return this._request('put', path, { data });
   }
 
   async _delete(path, params = {}) {
-    const res = await axios.delete(`${this.baseUrl}${path}`, {
-      headers: this._authHeaders(),
-      params,
-    });
-    return res.data;
+    return this._request('delete', path, { params });
   }
 
   // ---------------------------------------------------------------------------
@@ -64,8 +84,10 @@ class CloudMailClient {
    * @returns {Promise<string>} JWT token
    */
   async login(email, password) {
-    const res = await axios.post(`${this.baseUrl}/login`, { email, password });
-    const body = res.data;
+    const body = await this._request('post', '/login', {
+      data: { email, password },
+      includeAuth: false,
+    });
     if (!body || body.code !== 200 || !body.data || !body.data.token) {
       throw new Error('Login failed: ' + JSON.stringify(body));
     }
