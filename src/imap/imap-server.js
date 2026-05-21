@@ -4,9 +4,12 @@
  * IMAP4rev1 server (RFC 3501) that bridges to the cloud-mail API.
  *
  * Supported commands:
- *   CAPABILITY, NOOP, LOGOUT, LOGIN, LIST, LSUB, SELECT, EXAMINE,
- *   STATUS, FETCH, UID FETCH, STORE, UID STORE, EXPUNGE, SEARCH,
- *   UID SEARCH, CLOSE
+ *   CAPABILITY, NOOP, LOGOUT, LOGIN, AUTHENTICATE, LIST, LSUB,
+ *   SELECT, EXAMINE, STATUS, FETCH, UID FETCH, STORE, UID STORE,
+ *   EXPUNGE, SEARCH, UID SEARCH, CLOSE
+ *
+ * Supported AUTHENTICATE mechanisms:
+ *   PLAIN
  *
  * Supported FETCH items:
  *   FLAGS, UID, INTERNALDATE, RFC822.SIZE, RFC822, RFC822.HEADER,
@@ -40,7 +43,7 @@ const CloudMailClient = require('../api/cloud-mail-client');
 // Constants
 // ---------------------------------------------------------------------------
 
-const CAPABILITIES = 'IMAP4rev1 LITERAL+ UIDPLUS IDLE';
+const CAPABILITIES = 'IMAP4rev1 LITERAL+ UIDPLUS IDLE AUTH=PLAIN';
 
 /** Map well-known IMAP folder names to cloud-mail email types */
 const FOLDER_MAP = {
@@ -173,6 +176,26 @@ function parseFetchItems(raw) {
   return items;
 }
 
+/**
+ * Decode IMAP AUTHENTICATE PLAIN initial response or continuation payload.
+ * Payload decodes to: authzid\0authcid\0passwd
+ * @param {string} encoded
+ * @returns {{username: string, password: string}|null}
+ */
+function decodeAuthPlain(encoded) {
+  try {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const parts = decoded.split('\u0000');
+    if (parts.length < 3) return null;
+    const username = parts[1] || '';
+    const password = parts.slice(2).join('\u0000');
+    if (!username || !password) return null;
+    return { username, password };
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ImapSession
 // ---------------------------------------------------------------------------
@@ -197,6 +220,7 @@ class ImapSession {
     this.selectedType = null;
 
     this._buffer = '';
+    this._authContinuation = null;
 
     socket.setEncoding('utf8');
     socket.on('data', (data) => this._onData(data));
@@ -249,6 +273,13 @@ class ImapSession {
   // -------------------------------------------------------------------------
 
   async _dispatch(line) {
+    if (this._authContinuation) {
+      const handler = this._authContinuation;
+      this._authContinuation = null;
+      await handler(line);
+      return;
+    }
+
     // IMAP command: TAG COMMAND [args...]
     const m = line.match(/^(\S+)\s+(\S+)(.*)?$/);
     if (!m) { this._send('* BAD Invalid command'); return; }
@@ -257,12 +288,15 @@ class ImapSession {
     const command = m[2].toUpperCase();
     const rest = (m[3] || '').trim();
 
+    console.log(`[IMAP] C: ${line}`);
+
     try {
       switch (command) {
         case 'CAPABILITY': this._cmdCapability(tag); break;
         case 'NOOP':       this._ok(tag, 'NOOP completed'); break;
         case 'LOGOUT':     await this._cmdLogout(tag); break;
         case 'LOGIN':      await this._cmdLogin(tag, rest); break;
+        case 'AUTHENTICATE': await this._cmdAuthenticate(tag, rest); break;
         case 'LIST':       this._cmdList(tag, rest); break;
         case 'LSUB':       this._cmdLsub(tag, rest); break;
         case 'SELECT':     await this._cmdSelect(tag, rest, false); break;
@@ -324,15 +358,27 @@ class ImapSession {
   }
 
   // -------------------------------------------------------------------------
-  // LOGIN
+  // LOGIN / AUTHENTICATE
   // -------------------------------------------------------------------------
 
-  async _cmdLogin(tag, args) {
+  async _authenticateWithCredentials(tag, username, password, successMessage) {
     if (this.state !== 'NOT_AUTHENTICATED') {
       this._no(tag, 'Already authenticated');
       return;
     }
 
+    try {
+      await this.client.login(username, password);
+      this.state = 'AUTHENTICATED';
+      console.log(`[IMAP] authenticated: ${username}`);
+      this._ok(tag, successMessage);
+    } catch (err) {
+      console.error(`[IMAP] authentication failed for ${username}:`, err.message);
+      this._no(tag, `${successMessage.split(' ')[0]} failed: ${err.message}`);
+    }
+  }
+
+  async _cmdLogin(tag, args) {
     // LOGIN "user@example.com" "password"  OR  LOGIN user password
     const m = args.match(/^"([^"]+)"\s+"([^"]+)"$/) ||
               args.match(/^(\S+)\s+(\S+)$/) ||
@@ -346,14 +392,46 @@ class ImapSession {
 
     const username = m[1];
     const password = m[2];
+    await this._authenticateWithCredentials(tag, username, password, 'LOGIN completed');
+  }
 
-    try {
-      await this.client.login(username, password);
-      this.state = 'AUTHENTICATED';
-      this._ok(tag, 'LOGIN completed');
-    } catch (err) {
-      this._no(tag, `LOGIN failed: ${err.message}`);
+  async _cmdAuthenticate(tag, args) {
+    if (this.state !== 'NOT_AUTHENTICATED') {
+      this._no(tag, 'Already authenticated');
+      return;
     }
+
+    const parts = args.split(/\s+/).filter(Boolean);
+    const mechanism = (parts[0] || '').toUpperCase();
+    const initialResponse = parts[1] || null;
+
+    if (mechanism !== 'PLAIN') {
+      this._no(tag, `Unsupported authentication mechanism: ${mechanism || '(missing)'}`);
+      return;
+    }
+
+    const finishPlain = async (encoded) => {
+      if (encoded === '*') {
+        this._bad(tag, 'AUTHENTICATE cancelled');
+        return;
+      }
+
+      const creds = decodeAuthPlain(encoded);
+      if (!creds) {
+        this._bad(tag, 'Invalid AUTHENTICATE PLAIN payload');
+        return;
+      }
+
+      await this._authenticateWithCredentials(tag, creds.username, creds.password, 'AUTHENTICATE completed');
+    };
+
+    if (initialResponse) {
+      await finishPlain(initialResponse);
+      return;
+    }
+
+    this._authContinuation = finishPlain;
+    this._send('+');
   }
 
   // -------------------------------------------------------------------------
@@ -693,7 +771,6 @@ class ImapSession {
 
     const flags = flagStr.split(/\s+/).filter(Boolean);
     const markRead = [];
-    const markDeleted = [];
 
     for (const { seqNum, msg } of targets) {
       const op = operation.replace('.SILENT', '');
