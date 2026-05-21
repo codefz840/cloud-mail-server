@@ -23,30 +23,69 @@ class CloudMailClient {
     return { Authorization: `Bearer ${this.token}` };
   }
 
+  _buildRequestError(action, error) {
+    if (!error || typeof error !== 'object') {
+      return new Error(`${action} failed`);
+    }
+
+    const parts = [];
+    if (error.message) {
+      parts.push(error.message);
+    }
+
+    const status = error.response && error.response.status;
+    if (status) {
+      parts.push(`status ${status}`);
+    }
+
+    const data = error.response && error.response.data;
+    if (data !== undefined) {
+      if (typeof data === 'string') {
+        parts.push(data);
+      } else {
+        try {
+          parts.push(JSON.stringify(data));
+        } catch (_) {
+          parts.push('[unserializable response body]');
+        }
+      }
+    }
+
+    return new Error(`${action} failed: ${parts.join(' | ') || 'request error'}`);
+  }
+
+  async _request(action, fn) {
+    try {
+      return await fn();
+    } catch (error) {
+      throw this._buildRequestError(action, error);
+    }
+  }
+
   async _get(path, params = {}) {
-    const res = await axios.get(`${this.baseUrl}${path}`, {
+    const res = await this._request(`GET ${path}`, () => axios.get(`${this.baseUrl}${path}`, {
       headers: this._authHeaders(),
       params,
-    });
+    }));
     return res.data;
   }
 
   async _post(path, data = {}) {
-    const res = await axios.post(`${this.baseUrl}${path}`, data, {
+    const res = await this._request(`POST ${path}`, () => axios.post(`${this.baseUrl}${path}`, data, {
       headers: this._authHeaders(),
     });
     return res.data;
   }
 
   async _put(path, data = {}) {
-    const res = await axios.put(`${this.baseUrl}${path}`, data, {
+    const res = await this._request(`PUT ${path}`, () => axios.put(`${this.baseUrl}${path}`, data, {
       headers: this._authHeaders(),
-    });
+    }));
     return res.data;
   }
 
   async _delete(path, params = {}) {
-    const res = await axios.delete(`${this.baseUrl}${path}`, {
+    const res = await this._request(`DELETE ${path}`, () => axios.delete(`${this.baseUrl}${path}`, {
       headers: this._authHeaders(),
       params,
     });
@@ -64,7 +103,7 @@ class CloudMailClient {
    * @returns {Promise<string>} JWT token
    */
   async login(email, password) {
-    const res = await axios.post(`${this.baseUrl}/login`, { email, password });
+    const res = await this._request('POST /login', () => axios.post(`${this.baseUrl}/login`, { email, password }));
     const body = res.data;
     if (!body || body.code !== 200 || !body.data || !body.data.token) {
       throw new Error('Login failed: ' + JSON.stringify(body));
