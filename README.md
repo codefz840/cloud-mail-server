@@ -139,6 +139,18 @@ npm run dev
 npm test
 ```
 
+Integration tests for the cloud-mail API also use these environment variables when set:
+
+```env
+TEST_MAIL_USER=your-test-mail-address@example.com
+TEST_MAIL_PASS=your-test-mail-password
+CLOUD_MAIL_URL=https://mail.example.com
+```
+
+## CI
+
+GitHub Actions runs `npm test` on every push and pull request. When `TEST_MAIL_USER`, `TEST_MAIL_PASS`, and `CLOUD_MAIL_URL` are configured as repository secrets or variables, the integration suite exercises the live cloud-mail API as part of the run.
+
 ---
 
 ## Licence
