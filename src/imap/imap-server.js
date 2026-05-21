@@ -6,6 +6,7 @@
  * Supported commands:
  *   CAPABILITY, NOOP, LOGOUT, LOGIN, AUTHENTICATE, LIST, LSUB,
  *   SELECT, EXAMINE, STATUS, FETCH, UID FETCH, STORE, UID STORE,
+ *   COPY, UID COPY, MOVE, UID MOVE,
  *   EXPUNGE, SEARCH, UID SEARCH, CLOSE
  *
  * Supported AUTHENTICATE mechanisms:
@@ -20,6 +21,10 @@
  * Folder structure exposed to clients:
  *   INBOX  → cloud-mail type=0 (received emails)
  *   Sent   → cloud-mail type=1 (sent emails)
+ *   Trash  → session-local virtual trash (cloud-mail has no native trash)
+ *            COPY/MOVE to Trash stores emails in memory for the session.
+ *            EXPUNGE on Trash permanently deletes via the API.
+ *            COPY/MOVE between INBOX and Sent is not supported.
  *
  * Known limitations:
  *   - SEARCH criteria are not evaluated; all messages are always returned.
@@ -43,7 +48,7 @@ const CloudMailClient = require('../api/cloud-mail-client');
 // Constants
 // ---------------------------------------------------------------------------
 
-const CAPABILITIES = 'IMAP4rev1 LITERAL+ UIDPLUS IDLE AUTH=PLAIN';
+const CAPABILITIES = 'IMAP4rev1 LITERAL+ UIDPLUS IDLE MOVE SPECIAL-USE AUTH=PLAIN';
 
 /** Map well-known IMAP folder names to cloud-mail email types */
 const FOLDER_MAP = {
@@ -51,6 +56,9 @@ const FOLDER_MAP = {
   SENT: 1,
   'SENT MESSAGES': 1,
   'SENT ITEMS': 1,
+  TRASH: 'trash',
+  'DELETED ITEMS': 'trash',
+  'DELETED MESSAGES': 'trash',
 };
 
 // ---------------------------------------------------------------------------
@@ -216,8 +224,22 @@ class ImapSession {
     /** Set of UIDs to be expunged (STORE \Deleted) */
     this.pendingDeletes = new Set();
 
-    /** cloud-mail type for selected folder (0=INBOX, 1=Sent) */
+    /** cloud-mail type for selected folder (0=INBOX, 1=Sent, 'trash') */
     this.selectedType = null;
+
+    /**
+     * Session-local Trash store.
+     * Holds email objects that were COPY'd or MOVE'd to Trash within this
+     * session.  cloud-mail has no native trash; we keep the copies in memory.
+     */
+    this.trashMessages = [];
+
+    /**
+     * Tracks emailIds present in trashMessages that were COPY'd (not MOVE'd),
+     * meaning the API copy still exists and must be deleted when Trash is
+     * EXPUNGE'd or when the source folder is EXPUNGE'd.
+     */
+    this._trashApiIds = new Set();
 
     this._buffer = '';
     this._authContinuation = null;
@@ -304,6 +326,8 @@ class ImapSession {
         case 'STATUS':     await this._cmdStatus(tag, rest); break;
         case 'FETCH':      await this._cmdFetch(tag, rest, false); break;
         case 'STORE':      await this._cmdStore(tag, rest, false); break;
+        case 'COPY':       await this._cmdCopy(tag, rest, false); break;
+        case 'MOVE':       await this._cmdMove(tag, rest, false); break;
         case 'EXPUNGE':    await this._cmdExpunge(tag); break;
         case 'SEARCH':     this._cmdSearch(tag, rest); break;
         case 'CLOSE':      await this._cmdClose(tag); break;
@@ -315,6 +339,8 @@ class ImapSession {
           switch (subCmd) {
             case 'FETCH':   await this._cmdFetch(tag, subArgs, true); break;
             case 'STORE':   await this._cmdStore(tag, subArgs, true); break;
+            case 'COPY':    await this._cmdCopy(tag, subArgs, true); break;
+            case 'MOVE':    await this._cmdMove(tag, subArgs, true); break;
             case 'EXPUNGE': await this._cmdUidExpunge(tag, subArgs); break;
             case 'SEARCH':  this._cmdSearch(tag, subArgs); break;
             default: this._bad(tag, `Unknown UID sub-command: ${subCmd}`);
@@ -448,6 +474,7 @@ class ImapSession {
     // We expose a fixed folder list regardless of the pattern
     this._send('* LIST (\\HasNoChildren) "/" "INBOX"');
     this._send('* LIST (\\HasNoChildren \\Sent) "/" "Sent"');
+    this._send('* LIST (\\HasNoChildren \\Trash) "/" "Trash"');
     this._ok(tag, 'LIST completed');
   }
 
@@ -459,6 +486,7 @@ class ImapSession {
 
     this._send('* LSUB (\\HasNoChildren) "/" "INBOX"');
     this._send('* LSUB (\\HasNoChildren \\Sent) "/" "Sent"');
+    this._send('* LSUB (\\HasNoChildren \\Trash) "/" "Trash"');
     this._ok(tag, 'LSUB completed');
   }
 
@@ -485,10 +513,14 @@ class ImapSession {
     this.selectedType = type;
     this.pendingDeletes.clear();
 
-    // Fetch emails from cloud-mail
-    this.messages = await this.client.fetchAllEmails(type);
-    // Ensure oldest-to-newest order (ascending emailId) for IMAP sequence numbers
-    this.messages.sort((a, b) => a.emailId - b.emailId);
+    // Fetch emails from cloud-mail (or use session-local Trash store)
+    if (type === 'trash') {
+      this.messages = [...this.trashMessages];
+    } else {
+      this.messages = await this.client.fetchAllEmails(type);
+      // Ensure oldest-to-newest order (ascending emailId) for IMAP sequence numbers
+      this.messages.sort((a, b) => a.emailId - b.emailId);
+    }
 
     const total = this.messages.length;
     const unseen = this.messages.filter(m => m.unread === 1).length;
@@ -534,6 +566,8 @@ class ImapSession {
     let messages;
     if (this.selectedType === type) {
       messages = this.messages;
+    } else if (type === 'trash') {
+      messages = this.trashMessages;
     } else {
       messages = await this.client.fetchAllEmails(type);
     }
@@ -819,10 +853,32 @@ class ImapSession {
 
     if (this.pendingDeletes.size > 0) {
       const idsToDelete = [...this.pendingDeletes];
-      try {
-        await this.client.deleteEmails(idsToDelete);
-      } catch (err) {
-        console.error('[IMAP] deleteEmails failed:', err.message);
+
+      if (this.selectedType === 'trash') {
+        // For Trash: only delete IDs that still exist in the API (those that
+        // were COPY'd).  MOVE'd messages were already deleted from the API.
+        const apiIds = idsToDelete.filter(id => this._trashApiIds.has(id));
+        if (apiIds.length > 0) {
+          try {
+            await this.client.deleteEmails(apiIds);
+          } catch (err) {
+            console.error('[IMAP] deleteEmails (Trash) failed:', err.message);
+          }
+          for (const id of apiIds) this._trashApiIds.delete(id);
+        }
+        // Also remove from the session-local trash store.
+        this.trashMessages = this.trashMessages.filter(
+          m => !this.pendingDeletes.has(m.emailId)
+        );
+      } else {
+        try {
+          await this.client.deleteEmails(idsToDelete);
+        } catch (err) {
+          console.error('[IMAP] deleteEmails failed:', err.message);
+        }
+        // These IDs no longer exist in the API; remove from the trash-API-ID
+        // tracking set to prevent a double-delete when Trash is expunged.
+        for (const id of idsToDelete) this._trashApiIds.delete(id);
       }
 
       // Send EXPUNGE responses in reverse order (required by RFC 3501)
@@ -857,10 +913,28 @@ class ImapSession {
     const requestedUids = parseUidSet(uidSet, uids);
 
     if (requestedUids.length > 0) {
-      try {
-        await this.client.deleteEmails(requestedUids);
-      } catch (err) {
-        console.error('[IMAP] UID EXPUNGE deleteEmails failed:', err.message);
+      if (this.selectedType === 'trash') {
+        // Only call the API for IDs that still exist there (COPY'd, not MOVE'd).
+        const apiIds = requestedUids.filter(id => this._trashApiIds.has(id));
+        if (apiIds.length > 0) {
+          try {
+            await this.client.deleteEmails(apiIds);
+          } catch (err) {
+            console.error('[IMAP] UID EXPUNGE deleteEmails (Trash) failed:', err.message);
+          }
+          for (const id of apiIds) this._trashApiIds.delete(id);
+        }
+        // Remove from session-local trash store.
+        this.trashMessages = this.trashMessages.filter(
+          m => !requestedUids.includes(m.emailId)
+        );
+      } else {
+        try {
+          await this.client.deleteEmails(requestedUids);
+        } catch (err) {
+          console.error('[IMAP] UID EXPUNGE deleteEmails failed:', err.message);
+        }
+        for (const id of requestedUids) this._trashApiIds.delete(id);
       }
 
       for (let i = this.messages.length - 1; i >= 0; i--) {
@@ -902,9 +976,179 @@ class ImapSession {
   }
 
   // -------------------------------------------------------------------------
-  // CLOSE
+  // COPY / UID COPY
   // -------------------------------------------------------------------------
 
+  /**
+   * Resolve COPY/MOVE source messages from the current mailbox.
+   * @param {string} seqOrUidSet  Sequence set or UID set string
+   * @param {boolean} byUid
+   * @returns {{seqNum: number, msg: Object}[]}
+   */
+  _resolveCopyTargets(seqOrUidSet, byUid) {
+    const total = this.messages.length;
+    if (byUid) {
+      const uids = this.messages.map(m => m.emailId);
+      return parseUidSet(seqOrUidSet, uids)
+        .map(uid => {
+          const idx = this.messages.findIndex(m => m.emailId === uid);
+          return idx !== -1 ? { seqNum: idx + 1, msg: this.messages[idx] } : null;
+        })
+        .filter(Boolean);
+    }
+    return parseSequenceSet(seqOrUidSet, total)
+      .filter(n => n >= 1 && n <= total)
+      .map(n => ({ seqNum: n, msg: this.messages[n - 1] }));
+  }
+
+  /**
+   * Parse destination-mailbox name from COPY/MOVE args.
+   * Accepts:  COPY sequence "Mailbox"  or  COPY sequence Mailbox
+   * @param {string} args
+   * @returns {{seqOrUidSet: string, destName: string}|null}
+   */
+  _parseCopyArgs(args) {
+    const m = args.match(/^(\S+)\s+"([^"]+)"\s*$/) ||
+              args.match(/^(\S+)\s+(\S+)\s*$/);
+    if (!m) return null;
+    return { seqOrUidSet: m[1], destName: m[2].toUpperCase() };
+  }
+
+  /**
+   * COPY – copy messages to another mailbox (RFC 3501 §6.4.7).
+   *
+   * Copies to Trash are stored in the session-local trash store.
+   * The API copies still exist until the source is EXPUNGE'd; they are tracked
+   * in _trashApiIds and permanently deleted when Trash is EXPUNGE'd.
+   *
+   * Copies between non-Trash folders are not supported by the cloud-mail API
+   * and return NO.
+   */
+  async _cmdCopy(tag, args, byUid) {
+    if (this.state !== 'SELECTED') {
+      this._no(tag, 'No mailbox selected');
+      return;
+    }
+
+    const parsed = this._parseCopyArgs(args);
+    if (!parsed) { this._bad(tag, 'Syntax: COPY sequence mailbox'); return; }
+
+    const { seqOrUidSet, destName } = parsed;
+    const destType = FOLDER_MAP[destName];
+
+    if (destType === undefined) {
+      this._no(tag, `[TRYCREATE] No such mailbox: ${destName}`);
+      return;
+    }
+
+    const targets = this._resolveCopyTargets(seqOrUidSet, byUid);
+
+    if (targets.length === 0) {
+      this._ok(tag, 'COPY completed');
+      return;
+    }
+
+    if (destType === 'trash') {
+      const srcUids = [];
+      const dstUids = [];
+      for (const { msg } of targets) {
+        if (!this.trashMessages.find(t => t.emailId === msg.emailId)) {
+          this.trashMessages.push(msg);
+        }
+        // The API copy still exists; track it for permanent deletion later.
+        this._trashApiIds.add(msg.emailId);
+        srcUids.push(msg.emailId);
+        dstUids.push(msg.emailId);
+      }
+      const uidValidity = 1;
+      this._ok(tag, `[COPYUID ${uidValidity} ${srcUids.join(',')} ${dstUids.join(',')}] COPY completed`);
+      return;
+    }
+
+    // Copying between INBOX/Sent is not supported by the cloud-mail API.
+    this._no(tag, 'Cannot copy between these folders');
+  }
+
+  // -------------------------------------------------------------------------
+  // MOVE / UID MOVE  (RFC 6851)
+  // -------------------------------------------------------------------------
+
+  /**
+   * MOVE – atomically move messages to another mailbox (RFC 6851).
+   *
+   * Moves to Trash: messages are added to the session-local trash store and
+   * immediately deleted from the API, so _trashApiIds tracking is not needed.
+   *
+   * Moves between non-Trash folders are not supported and return NO.
+   */
+  async _cmdMove(tag, args, byUid) {
+    if (this.state !== 'SELECTED') {
+      this._no(tag, 'No mailbox selected');
+      return;
+    }
+    if (this.readOnly) {
+      this._no(tag, '[READ-ONLY] Mailbox is read-only');
+      return;
+    }
+
+    const parsed = this._parseCopyArgs(args);
+    if (!parsed) { this._bad(tag, 'Syntax: MOVE sequence mailbox'); return; }
+
+    const { seqOrUidSet, destName } = parsed;
+    const destType = FOLDER_MAP[destName];
+
+    if (destType === undefined) {
+      this._no(tag, `[TRYCREATE] No such mailbox: ${destName}`);
+      return;
+    }
+
+    const targets = this._resolveCopyTargets(seqOrUidSet, byUid);
+
+    if (targets.length === 0) {
+      this._ok(tag, 'MOVE completed');
+      return;
+    }
+
+    if (destType === 'trash') {
+      const srcUids = [];
+      const dstUids = [];
+      for (const { msg } of targets) {
+        if (!this.trashMessages.find(t => t.emailId === msg.emailId)) {
+          this.trashMessages.push(msg);
+        }
+        srcUids.push(msg.emailId);
+        dstUids.push(msg.emailId);
+      }
+
+      // MOVE semantics: permanently delete from the API immediately.
+      try {
+        await this.client.deleteEmails(srcUids);
+      } catch (err) {
+        console.error('[IMAP] MOVE deleteEmails failed:', err.message);
+      }
+      // These IDs are gone from the API; ensure _trashApiIds won't double-delete.
+      for (const id of srcUids) this._trashApiIds.delete(id);
+
+      // Remove from current mailbox view; send EXPUNGE in reverse order.
+      const sortedTargets = [...targets].sort((a, b) => b.seqNum - a.seqNum);
+      for (const { seqNum, msg } of sortedTargets) {
+        this.pendingDeletes.delete(msg.emailId);
+        this.messages.splice(seqNum - 1, 1);
+        this._send(`* ${seqNum} EXPUNGE`);
+      }
+
+      const uidValidity = 1;
+      this._ok(tag, `[COPYUID ${uidValidity} ${srcUids.join(',')} ${dstUids.join(',')}] MOVE completed`);
+      return;
+    }
+
+    // Moving between INBOX/Sent is not supported by the cloud-mail API.
+    this._no(tag, 'Cannot move between these folders');
+  }
+
+  // -------------------------------------------------------------------------
+  // CLOSE
+  // -------------------------------------------------------------------------
   async _cmdClose(tag) {
     if (this.state !== 'SELECTED') {
       this._no(tag, 'No mailbox selected');
@@ -914,7 +1158,9 @@ class ImapSession {
     // Silently expunge deleted messages
     if (!this.readOnly && this.pendingDeletes.size > 0) {
       try {
-        await this.client.deleteEmails([...this.pendingDeletes]);
+        const idsToDelete = [...this.pendingDeletes];
+        await this.client.deleteEmails(idsToDelete);
+        for (const id of idsToDelete) this._trashApiIds.delete(id);
       } catch (err) {
         console.error('[IMAP] CLOSE deleteEmails failed:', err.message);
       }

@@ -21,9 +21,12 @@ Email Client ──IMAP/SMTP──▶ cloud-mail-server ──HTTPS──▶ clo
 ### IMAP capabilities
 - **INBOX** folder – received emails (`type=0`)
 - **Sent** folder – sent emails (`type=1`)
+- **Trash** folder – session-local trash (emails moved/copied here are held in memory for the duration of the session; cloud-mail has no native trash concept)
 - `FETCH` with `FLAGS`, `UID`, `INTERNALDATE`, `RFC822.SIZE`, `RFC822`, `ENVELOPE`, `BODY[…]`, `BODYSTRUCTURE`
+- `COPY` / `UID COPY` – copy messages to Trash (RFC 3501 §6.4.7)
+- `MOVE` / `UID MOVE` – move messages to Trash, immediately deleting them from the API (RFC 6851)
 - `STORE` – mark as `\Seen` / `\Deleted`
-- `EXPUNGE` – permanently delete flagged messages
+- `EXPUNGE` – permanently delete flagged messages (expunging Trash also permanently deletes any copied-but-not-yet-expunged messages)
 - `SEARCH` – returns all messages (basic support)
 - `IDLE` – acknowledged (polling re-SELECT for new mail)
 
