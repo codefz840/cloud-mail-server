@@ -28,10 +28,20 @@ jobs:
 
       - name: Configure DNS resolver
         run: |
-          sudo sh -c 'cat <<EOF >/etc/resolv.conf
-          nameserver 1.1.1.1
-          nameserver 1.0.0.1
-          EOF'
+          if command -v resolvectl >/dev/null 2>&1; then
+            dns_link="$(resolvectl status | awk '/^Link [0-9]+ \(/ {gsub(/[()]/, "", $3); link=$3} /Current Scopes:.*DNS/ {print link; exit}')"
+            if [ -n "$dns_link" ]; then
+              sudo resolvectl dns "$dns_link" 1.1.1.1 1.0.0.1
+              sudo resolvectl flush-caches
+            fi
+          fi
+
+          if ! grep -q '^nameserver 1.1.1.1$' /etc/resolv.conf; then
+            sudo sh -c 'cat <<EOF >/etc/resolv.conf
+            nameserver 1.1.1.1
+            nameserver 1.0.0.1
+            EOF'
+          fi
 
       - name: Validate integration environment
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
