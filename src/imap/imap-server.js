@@ -251,6 +251,8 @@ class ImapSession {
 
     this._buffer = '';
     this._authContinuation = null;
+    /** Tag saved when entering IDLE state, used to send the tagged OK on DONE */
+    this._idleTag = null;
 
     socket.setEncoding('utf8');
     socket.on('data', (data) => this._onData(data));
@@ -360,6 +362,15 @@ class ImapSession {
       return;
     }
 
+    // Handle IDLE DONE: bare "DONE" with no tag (RFC 2177 §3)
+    if (line.trim().toUpperCase() === 'DONE') {
+      if (this._idleTag) {
+        this._ok(this._idleTag, 'IDLE terminated');
+        this._idleTag = null;
+      }
+      return;
+    }
+
     // IMAP command: TAG COMMAND [args...]
     const m = line.match(/^(\S+)\s+(\S+)(.*)?$/);
     if (!m) { this._send('* BAD Invalid command'); return; }
@@ -400,13 +411,14 @@ class ImapSession {
             case 'COPY':    await this._cmdCopy(tag, subArgs, true); break;
             case 'MOVE':    await this._cmdMove(tag, subArgs, true); break;
             case 'EXPUNGE': await this._cmdUidExpunge(tag, subArgs); break;
-            case 'SEARCH':  this._cmdSearch(tag, subArgs); break;
+            case 'SEARCH':  this._cmdSearch(tag, subArgs, true); break;
             default: this._bad(tag, `Unknown UID sub-command: ${subCmd}`);
           }
           break;
         }
         case 'IDLE': {
-          // Minimal IDLE: just acknowledge, wait for DONE
+          // Minimal IDLE: acknowledge and wait for DONE (RFC 2177)
+          this._idleTag = tag;
           this._send('+ idling');
           // We don't push new mail; the client will re-SELECT periodically
           break;
@@ -1014,7 +1026,7 @@ class ImapSession {
   // SEARCH / UID SEARCH
   // -------------------------------------------------------------------------
 
-  _cmdSearch(tag, args) {
+  _cmdSearch(tag, args, byUid = false) {
     if (this.state !== 'SELECTED') {
       this._no(tag, 'No mailbox selected');
       return;
@@ -1028,11 +1040,11 @@ class ImapSession {
     // results than strictly necessary.
     // A complete per-criteria implementation (ALL, UNSEEN, SINCE, TEXT, etc.)
     // can be added in a future iteration.
-    const nums = this.messages
-      .map((_, i) => i + 1)
-      .join(' ');
+    const results = byUid
+      ? this.messages.map(m => m.emailId).join(' ')
+      : this.messages.map((_, i) => i + 1).join(' ');
 
-    this._send(`* SEARCH ${nums}`);
+    this._send(`* SEARCH ${results}`);
     this._ok(tag, 'SEARCH completed');
   }
 

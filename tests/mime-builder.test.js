@@ -7,6 +7,7 @@ const {
   buildEnvelope,
   buildBodyStructure,
   encodeMimeHeader,
+  buildAddress,
 } = require('../src/utils/mime-builder');
 
 // Minimal cloud-mail email object fixture
@@ -42,8 +43,37 @@ const emailNonAsciiSubject = {
 };
 
 // ---------------------------------------------------------------------------
-// encodeMimeHeader
+// buildAddress
 // ---------------------------------------------------------------------------
+describe('buildAddress', () => {
+  test('ASCII name uses quoted-string format', () => {
+    const result = buildAddress('Alice Smith', 'alice@example.com');
+    expect(result).toBe('"Alice Smith" <alice@example.com>');
+  });
+
+  test('no name returns bare email address', () => {
+    expect(buildAddress('', 'alice@example.com')).toBe('alice@example.com');
+    expect(buildAddress(null, 'alice@example.com')).toBe('alice@example.com');
+  });
+
+  test('non-ASCII name uses unquoted encoded word (RFC 2047 §5 compliance)', () => {
+    const result = buildAddress('王小明', 'wang@example.com');
+    // Must NOT wrap encoded word in a quoted-string
+    expect(result).not.toMatch(/^"=\?/);
+    // Must start with an RFC 2047 encoded word
+    expect(result).toMatch(/^=\?UTF-8\?B\?/);
+    expect(result).toContain('<wang@example.com>');
+  });
+
+  test('non-ASCII name decodes correctly', () => {
+    const result = buildAddress('王小明', 'wang@example.com');
+    const match = result.match(/=\?UTF-8\?B\?([^?]+)\?=/);
+    expect(match).not.toBeNull();
+    expect(Buffer.from(match[1], 'base64').toString('utf8')).toBe('王小明');
+  });
+});
+
+
 describe('encodeMimeHeader', () => {
   test('leaves ASCII strings unchanged', () => {
     expect(encodeMimeHeader('Hello World')).toBe('Hello World');
