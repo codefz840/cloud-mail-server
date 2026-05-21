@@ -1,0 +1,22 @@
+{
+  "name": "cloud-mail-server",
+  "version": "1.0.0",
+  "description": "IMAP/SMTP middleware server for cloud-mail (https://github.com/maillab/cloud-mail)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "jest --testEnvironment=node"
+  },
+  "keywords": ["imap", "smtp", "cloud-mail", "email", "cloudflare"],
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "mailparser": "^3.7.1",
+    "smtp-server": "^3.13.6"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
