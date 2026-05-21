@@ -1037,7 +1037,7 @@ class ImapSession {
     const destType = FOLDER_MAP[destName];
 
     if (destType === undefined) {
-      this._no(tag, `[TRYCREATE] No such mailbox: ${parsed.destName}`);
+      this._no(tag, `[TRYCREATE] No such mailbox: ${destName}`);
       return;
     }
 
@@ -1098,7 +1098,7 @@ class ImapSession {
     const destType = FOLDER_MAP[destName];
 
     if (destType === undefined) {
-      this._no(tag, `[TRYCREATE] No such mailbox: ${parsed.destName}`);
+      this._no(tag, `[TRYCREATE] No such mailbox: ${destName}`);
       return;
     }
 
