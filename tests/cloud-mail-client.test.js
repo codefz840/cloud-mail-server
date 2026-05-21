@@ -11,7 +11,7 @@ function createHttpError(status, data, message = `HTTP ${status}`) {
   return error;
 }
 
-describe('CloudMailClient API behavior', () => {
+describe('CloudMailClient API fallback and error handling', () => {
   beforeEach(() => {
     jest.resetAllMocks();
   });

@@ -14,10 +14,11 @@ class CloudMailClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     const hasApiSuffix = this.baseUrl.endsWith(API_PATH_SUFFIX);
+    const hasBasePathBeforeApi = this.baseUrl !== API_PATH_SUFFIX;
     // Prefer modern worker routes under /api.
     this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
     // Fallback for deployments exposing legacy root routes.
-    if (hasApiSuffix && this.baseUrl.length > API_PATH_SUFFIX.length) {
+    if (hasApiSuffix && hasBasePathBeforeApi) {
       this.fallbackBaseUrl = this.baseUrl.slice(0, -API_PATH_SUFFIX.length);
     } else {
       this.fallbackBaseUrl = this.baseUrl;
@@ -45,10 +46,14 @@ class CloudMailClient {
     }
 
     const status = error.response && error.response.status;
+    const statusText = String(status);
     const mentionsStatus = Boolean(
       status &&
       error.message &&
-      new RegExp(`\\b(?:HTTP|status)\\s+${status}\\b`, 'i').test(error.message)
+      (
+        error.message.includes(`HTTP ${statusText}`) ||
+        error.message.toLowerCase().includes(`status ${statusText}`)
+      )
     );
     if (status && !mentionsStatus) {
       parts.push(`status ${status}`);
