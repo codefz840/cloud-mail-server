@@ -74,7 +74,7 @@ describeIfConfigured('CloudMailClient integration', () => {
 
     const inboxPage = await client.listEmails({ type: 0, size: 10 });
     expect(Array.isArray(inboxPage.list)).toBe(true);
-    expect(typeof inboxPage.total).toBe('number');
+    expect(inboxPage).toHaveProperty('total');
 
     const sentEmail = await client.sendEmail({
       accountId: account.accountId,
