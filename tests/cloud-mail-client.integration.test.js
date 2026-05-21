@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const CloudMailClient = require('../src/api/cloud-mail-client');
 
 const requiredEnvVars = ['CLOUD_MAIL_URL', 'TEST_MAIL_USER', 'TEST_MAIL_PASS'];
@@ -23,7 +24,7 @@ async function waitFor(fn, message, attempts = 12, delayMs = 5000) {
 describeIfConfigured('CloudMailClient integration', () => {
   jest.setTimeout(120000);
 
-  const uniqueId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const uniqueId = crypto.randomUUID();
   const subject = `[cloud-mail-server] integration ${uniqueId}`;
   const text = `integration test ${uniqueId}`;
   const html = `<p>${text}</p>`;

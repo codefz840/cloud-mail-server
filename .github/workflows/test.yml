@@ -7,6 +7,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       CLOUD_MAIL_URL: ${{ secrets.CLOUD_MAIL_URL || vars.CLOUD_MAIL_URL }}
       TEST_MAIL_USER: ${{ secrets.TEST_MAIL_USER || vars.TEST_MAIL_USER }}
@@ -25,7 +27,7 @@ jobs:
         run: npm ci
 
       - name: Validate integration environment
-        if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           test -n "$CLOUD_MAIL_URL"
           test -n "$TEST_MAIL_USER"
