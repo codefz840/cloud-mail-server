@@ -38,8 +38,12 @@ function escapeDisplayName(name) {
  */
 function buildAddress(name, email) {
   if (!name) return email || '';
-  const encodedName = encodeMimeHeader(escapeDisplayName(name));
-  return `"${encodedName}" <${email}>`;
+  // RFC 2047 §5 prohibits encoded words inside quoted-strings.
+  // Use a quoted-string for ASCII-only names; use an unquoted encoded word otherwise.
+  if (/^[\x00-\x7F]*$/.test(name)) {
+    return `"${escapeDisplayName(name)}" <${email}>`;
+  }
+  return `${encodeMimeHeader(name)} <${email}>`;
 }
 
 /**
@@ -248,4 +252,4 @@ function buildBodyStructure(email) {
   }
 }
 
-module.exports = { buildMime, extractHeaders, extractBody, buildEnvelope, buildBodyStructure, encodeMimeHeader };
+module.exports = { buildMime, extractHeaders, extractBody, buildEnvelope, buildBodyStructure, encodeMimeHeader, buildAddress };

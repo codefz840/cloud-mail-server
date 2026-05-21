@@ -251,6 +251,8 @@ class ImapSession {
 
     this._buffer = '';
     this._authContinuation = null;
+    /** Tag saved when entering IDLE state, used to send the tagged OK on DONE */
+    this._idleTag = null;
 
     socket.setEncoding('utf8');
     socket.on('data', (data) => this._onData(data));
@@ -360,6 +362,15 @@ class ImapSession {
       return;
     }
 
+    // Handle IDLE DONE: bare "DONE" with no tag (RFC 2177 §3)
+    if (line.trim().toUpperCase() === 'DONE') {
+      if (this._idleTag) {
+        this._ok(this._idleTag, 'IDLE terminated');
+        this._idleTag = null;
+      }
+      return;
+    }
+
     // IMAP command: TAG COMMAND [args...]
     const m = line.match(/^(\S+)\s+(\S+)(.*)?$/);
     if (!m) { this._send('* BAD Invalid command'); return; }
@@ -400,13 +411,14 @@ class ImapSession {
             case 'COPY':    await this._cmdCopy(tag, subArgs, true); break;
             case 'MOVE':    await this._cmdMove(tag, subArgs, true); break;
             case 'EXPUNGE': await this._cmdUidExpunge(tag, subArgs); break;
-            case 'SEARCH':  this._cmdSearch(tag, subArgs); break;
+            case 'SEARCH':  this._cmdSearch(tag, subArgs, true); break;
             default: this._bad(tag, `Unknown UID sub-command: ${subCmd}`);
           }
           break;
         }
         case 'IDLE': {
-          // Minimal IDLE: just acknowledge, wait for DONE
+          // Minimal IDLE: acknowledge and wait for DONE (RFC 2177)
+          this._idleTag = tag;
           this._send('+ idling');
           // We don't push new mail; the client will re-SELECT periodically
           break;
@@ -582,7 +594,7 @@ class ImapSession {
     }
 
     const total = this.messages.length;
-    const unseen = this.messages.filter(m => m.unread === 1).length;
+    const unseen = this.messages.filter(m => m.unread === 0).length;
     const uidValidity = 1; // fixed; we don't need to change mailboxes
     const uidNext = total > 0 ? this.messages[total - 1].emailId + 1 : 1;
 
@@ -590,7 +602,7 @@ class ImapSession {
     this._send(`* 0 RECENT`);
     if (unseen > 0) {
       // Find the first unseen message's sequence number
-      const firstUnseen = this.messages.findIndex(m => m.unread === 1) + 1;
+      const firstUnseen = this.messages.findIndex(m => m.unread === 0) + 1;
       this._send(`* OK [UNSEEN ${firstUnseen}] First unseen message`);
     }
     this._send(`* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\*)] Permanent flags`);
@@ -634,7 +646,7 @@ class ImapSession {
     }
 
     const total = messages.length;
-    const unseen = messages.filter(m => m.unread === 1).length;
+    const unseen = messages.filter(m => m.unread === 0).length;
     const uidNext = total > 0 ? Math.max(...messages.map(m => m.emailId)) + 1 : 1;
 
     const itemList = m[2].toUpperCase().split(/\s+/);
@@ -719,8 +731,8 @@ class ImapSession {
       }
 
       // Mark as seen if full body was requested and message is unread
-      if (implicitSeen && msg.unread === 1) {
-        msg.unread = 0; // optimistic local update
+      if (implicitSeen && msg.unread === 0) {
+        msg.unread = 1; // optimistic local update
         toMarkRead.push(msg.emailId);
       }
     }
@@ -745,7 +757,7 @@ class ImapSession {
    */
   _buildFetchItem(item, msg, raw, rawBuf) {
     const isDeleted = this.pendingDeletes.has(msg.emailId);
-    const isSeen = msg.unread === 0;
+    const isSeen = msg.unread === 1;
     const flagList = [
       ...(isSeen ? ['\\Seen'] : []),
       ...(isDeleted ? ['\\Deleted'] : []),
@@ -870,16 +882,16 @@ class ImapSession {
     for (const { seqNum, msg } of targets) {
       const op = operation.replace('.SILENT', '');
       if (op === 'FLAGS' || op === '+FLAGS') {
-        if (flags.includes('\\SEEN')) { msg.unread = 0; markRead.push(msg.emailId); }
+        if (flags.includes('\\SEEN')) { msg.unread = 1; markRead.push(msg.emailId); }
         if (flags.includes('\\DELETED')) this.pendingDeletes.add(msg.emailId);
       } else if (op === '-FLAGS') {
-        if (flags.includes('\\SEEN')) msg.unread = 1;
+        if (flags.includes('\\SEEN')) msg.unread = 0;
         if (flags.includes('\\DELETED')) this.pendingDeletes.delete(msg.emailId);
       }
 
       if (!silent) {
         const isDeleted = this.pendingDeletes.has(msg.emailId);
-        const isSeen = msg.unread === 0;
+        const isSeen = msg.unread === 1;
         const flagList = [
           ...(isSeen ? ['\\Seen'] : []),
           ...(isDeleted ? ['\\Deleted'] : []),
@@ -1014,7 +1026,7 @@ class ImapSession {
   // SEARCH / UID SEARCH
   // -------------------------------------------------------------------------
 
-  _cmdSearch(tag, args) {
+  _cmdSearch(tag, args, byUid = false) {
     if (this.state !== 'SELECTED') {
       this._no(tag, 'No mailbox selected');
       return;
@@ -1028,11 +1040,11 @@ class ImapSession {
     // results than strictly necessary.
     // A complete per-criteria implementation (ALL, UNSEEN, SINCE, TEXT, etc.)
     // can be added in a future iteration.
-    const nums = this.messages
-      .map((_, i) => i + 1)
-      .join(' ');
+    const results = byUid
+      ? this.messages.map(m => m.emailId).join(' ')
+      : this.messages.map((_, i) => i + 1).join(' ');
 
-    this._send(`* SEARCH ${nums}`);
+    this._send(`* SEARCH ${results}`);
     this._ok(tag, 'SEARCH completed');
   }
 

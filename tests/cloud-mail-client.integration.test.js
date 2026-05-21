@@ -108,11 +108,11 @@ describeIfConfigured('CloudMailClient integration', () => {
     const readInboxEmail = await waitFor(
       async () => {
         const email = await fetchEmailBySubject(0, subject);
-        return email && email.unread === 0 ? email : null;
+        return email && email.unread === 1 ? email : null;
       },
       `Timed out waiting for inbox email "${subject}" to be marked as read`
     );
-    expect(readInboxEmail.unread).toBe(0);
+    expect(readInboxEmail.unread).toBe(1);
 
     const allInboxEmails = await client.fetchAllEmails(0, 100);
     expect(allInboxEmails.some(email => email.emailId === inboxEmailId)).toBe(true);

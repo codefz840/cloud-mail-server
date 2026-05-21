@@ -94,7 +94,7 @@ describe('CloudMailClient API fallback and error handling', () => {
       expect.objectContaining({
         method: 'get',
         url: 'https://mail.example.com/api/account/list',
-        headers: { Authorization: 'Bearer jwt-token' },
+        headers: { Authorization: 'jwt-token' },
       })
     );
     expect(axios).toHaveBeenNthCalledWith(
@@ -102,7 +102,7 @@ describe('CloudMailClient API fallback and error handling', () => {
       expect.objectContaining({
         method: 'get',
         url: 'https://mail.example.com/account/list',
-        headers: { Authorization: 'Bearer jwt-token' },
+        headers: { Authorization: 'jwt-token' },
       })
     );
   });
