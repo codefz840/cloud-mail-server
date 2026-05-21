@@ -5,13 +5,13 @@ const CloudMailClient = require('../src/api/cloud-mail-client');
 
 jest.mock('axios');
 
-function createHttpError(status) {
-  const err = new Error(`HTTP ${status}`);
-  err.response = { status };
-  return err;
+function createHttpError(status, data, message = `HTTP ${status}`) {
+  const error = new Error(message);
+  error.response = { status, data };
+  return error;
 }
 
-describe('CloudMailClient API path fallback', () => {
+describe('CloudMailClient API fallback and error handling', () => {
   beforeEach(() => {
     jest.resetAllMocks();
   });
@@ -42,12 +42,38 @@ describe('CloudMailClient API path fallback', () => {
     );
   });
 
+  test('login retries from /api/login to /login on 404', async () => {
+    axios
+      .mockRejectedValueOnce(createHttpError(404))
+      .mockResolvedValueOnce({ data: { code: 200, data: { token: 'jwt-token' } } });
+
+    const client = new CloudMailClient('https://mail.example.com');
+    const token = await client.login('admin@example.com', 'secret');
+
+    expect(token).toBe('jwt-token');
+    expect(axios).toHaveBeenCalledTimes(2);
+    expect(axios).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        method: 'post',
+        url: 'https://mail.example.com/api/login',
+      })
+    );
+    expect(axios).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        method: 'post',
+        url: 'https://mail.example.com/login',
+      })
+    );
+  });
+
   test('login does not retry on 401', async () => {
     axios.mockRejectedValueOnce(createHttpError(401));
 
     const client = new CloudMailClient('https://mail.example.com');
     await expect(client.login('admin@example.com', 'bad-password')).rejects.toMatchObject({
-      response: { status: 401 },
+      message: 'POST /login failed: HTTP 401',
     });
     expect(axios).toHaveBeenCalledTimes(1);
   });
@@ -94,5 +120,30 @@ describe('CloudMailClient API path fallback', () => {
         url: 'https://mail.example.com/api/login',
       })
     );
+  });
+
+  test('base URL already ending with /api does not fall back to root routes', async () => {
+    axios.mockRejectedValueOnce(createHttpError(405));
+
+    const client = new CloudMailClient('https://mail.example.com/api');
+    await expect(client.login('admin@example.com', 'secret')).rejects.toMatchObject({
+      message: 'POST /login failed: HTTP 405',
+    });
+    expect(axios).toHaveBeenCalledTimes(1);
+  });
+
+  test('wraps Axios-style circular login failures in a serializable error', async () => {
+    const client = new CloudMailClient('https://mail.example.com');
+    const error = new Error('socket hang up');
+    const request = {};
+    const response = { status: 502, data: { message: 'bad gateway' }, request };
+    request.response = response;
+    error.response = response;
+
+    axios.mockRejectedValueOnce(error);
+
+    await expect(client.login('user@example.com', 'secret')).rejects.toMatchObject({
+      message: 'POST /login failed: socket hang up | status 502 | {"message":"bad gateway"}',
+    });
   });
 });

@@ -14,13 +14,16 @@ class CloudMailClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     const hasApiSuffix = this.baseUrl.endsWith(API_PATH_SUFFIX);
+    const hasBasePathBeforeApi = this.baseUrl !== API_PATH_SUFFIX;
     // Prefer modern worker routes under /api.
     this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
     // Fallback for deployments exposing legacy root routes.
-    this.fallbackBaseUrl = hasApiSuffix
-      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
-      : this.baseUrl;
-    this.fallbackEnabled = this.fallbackBaseUrl !== this.apiBaseUrl;
+    if (hasApiSuffix && hasBasePathBeforeApi) {
+      this.fallbackBaseUrl = this.baseUrl.slice(0, -API_PATH_SUFFIX.length);
+    } else {
+      this.fallbackBaseUrl = this.baseUrl;
+    }
+    this.fallbackEnabled = !hasApiSuffix && this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }
 
@@ -32,12 +35,53 @@ class CloudMailClient {
     return { Authorization: `Bearer ${this.token}` };
   }
 
-  _shouldRetryWithFallback(err) {
-    const status = err && err.response && err.response.status;
+  _buildRequestError(requestDescription, error) {
+    if (!error || typeof error !== 'object') {
+      return new Error(`${requestDescription} failed`);
+    }
+
+    const parts = [];
+    if (error.message) {
+      parts.push(error.message);
+    }
+
+    const status = error.response && error.response.status;
+    const statusCode = String(status);
+    const mentionsStatus = Boolean(
+      status &&
+      error.message &&
+      (
+        error.message.includes(`HTTP ${statusCode}`) ||
+        error.message.toLowerCase().includes(`status ${statusCode}`)
+      )
+    );
+    if (status && !mentionsStatus) {
+      parts.push(`status ${status}`);
+    }
+
+    const responseData = error.response && error.response.data;
+    if (responseData !== undefined) {
+      if (typeof responseData === 'string') {
+        parts.push(responseData);
+      } else {
+        try {
+          parts.push(JSON.stringify(responseData));
+        } catch (_) {
+          parts.push('[unserializable response body]');
+        }
+      }
+    }
+
+    return new Error(`${requestDescription} failed: ${parts.join(' | ') || 'request error'}`);
+  }
+
+  _shouldRetryWithFallback(error) {
+    const status = error && error.response && error.response.status;
     return (status === 404 || status === 405) && this.fallbackEnabled;
   }
 
   async _request(method, path, { params, data, includeAuth = true } = {}) {
+    const requestDescription = `${method.toUpperCase()} ${path}`;
     const makeRequest = async (baseUrl) => {
       const res = await axios({
         method,
@@ -46,14 +90,22 @@ class CloudMailClient {
         params,
         data,
       });
+      // Cloud-mail responses use the API envelope shape { code, data, ... }.
       return res.data;
     };
 
     try {
       return await makeRequest(this.apiBaseUrl);
-    } catch (err) {
-      if (!this._shouldRetryWithFallback(err)) throw err;
-      return await makeRequest(this.fallbackBaseUrl);
+    } catch (error) {
+      if (this._shouldRetryWithFallback(error)) {
+        try {
+          return await makeRequest(this.fallbackBaseUrl);
+        } catch (fallbackError) {
+          throw this._buildRequestError(requestDescription, fallbackError);
+        }
+      }
+
+      throw this._buildRequestError(requestDescription, error);
     }
   }
 
