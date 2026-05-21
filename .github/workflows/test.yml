@@ -31,7 +31,7 @@ jobs:
           use_resolv_conf_fallback=true
 
           if command -v resolvectl >/dev/null 2>&1; then
-            dns_link="$(ip route | awk '/^default/ {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
+            dns_link="$(ip -o route get 1.1.1.1 | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
             if [ -n "$dns_link" ]; then
               echo "Configuring resolvectl on link: $dns_link"
               if sudo resolvectl dns "$dns_link" 1.1.1.1 1.0.0.1; then
