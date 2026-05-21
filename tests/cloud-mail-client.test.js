@@ -5,7 +5,7 @@ const CloudMailClient = require('../src/api/cloud-mail-client');
 
 jest.mock('axios');
 
-function httpError(status) {
+function createHttpError(status) {
   const err = new Error(`HTTP ${status}`);
   err.response = { status };
   return err;
@@ -18,7 +18,7 @@ describe('CloudMailClient API path fallback', () => {
 
   test('login retries from /api/login to /login on 405', async () => {
     axios
-      .mockRejectedValueOnce(httpError(405))
+      .mockRejectedValueOnce(createHttpError(405))
       .mockResolvedValueOnce({ data: { code: 200, data: { token: 'jwt-token' } } });
 
     const client = new CloudMailClient('https://mail.example.com');
@@ -43,7 +43,7 @@ describe('CloudMailClient API path fallback', () => {
   });
 
   test('login does not retry on 401', async () => {
-    axios.mockRejectedValueOnce(httpError(401));
+    axios.mockRejectedValueOnce(createHttpError(401));
 
     const client = new CloudMailClient('https://mail.example.com');
     await expect(client.login('admin@example.com', 'bad-password')).rejects.toMatchObject({
@@ -54,7 +54,7 @@ describe('CloudMailClient API path fallback', () => {
 
   test('authenticated API calls also fallback on 405', async () => {
     axios
-      .mockRejectedValueOnce(httpError(405))
+      .mockRejectedValueOnce(createHttpError(405))
       .mockResolvedValueOnce({ data: { code: 200, data: [] } });
 
     const client = new CloudMailClient('https://mail.example.com');

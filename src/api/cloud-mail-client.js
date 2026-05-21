@@ -17,7 +17,9 @@ class CloudMailClient {
     const strippedBase = hasApiSuffix
       ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
       : this.baseUrl;
+    // Prefer modern worker routes under /api.
     this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
+    // Fallback for deployments exposing legacy root routes.
     this.fallbackBaseUrl = hasApiSuffix ? strippedBase : this.baseUrl;
     this.shouldAttemptFallback = this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
