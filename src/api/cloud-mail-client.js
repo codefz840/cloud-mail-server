@@ -32,7 +32,8 @@ class CloudMailClient {
   // ---------------------------------------------------------------------------
 
   _authHeaders() {
-    return { Authorization: `Bearer ${this.token}` };
+    // cloud-mail expects the raw JWT token in the Authorization header without a "Bearer " prefix.
+    return { Authorization: this.token };
   }
 
   _buildRequestError(requestDescription, error) {

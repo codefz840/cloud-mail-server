@@ -594,7 +594,7 @@ class ImapSession {
     }
 
     const total = this.messages.length;
-    const unseen = this.messages.filter(m => m.unread === 1).length;
+    const unseen = this.messages.filter(m => m.unread === 0).length;
     const uidValidity = 1; // fixed; we don't need to change mailboxes
     const uidNext = total > 0 ? this.messages[total - 1].emailId + 1 : 1;
 
@@ -602,7 +602,7 @@ class ImapSession {
     this._send(`* 0 RECENT`);
     if (unseen > 0) {
       // Find the first unseen message's sequence number
-      const firstUnseen = this.messages.findIndex(m => m.unread === 1) + 1;
+      const firstUnseen = this.messages.findIndex(m => m.unread === 0) + 1;
       this._send(`* OK [UNSEEN ${firstUnseen}] First unseen message`);
     }
     this._send(`* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\*)] Permanent flags`);
@@ -646,7 +646,7 @@ class ImapSession {
     }
 
     const total = messages.length;
-    const unseen = messages.filter(m => m.unread === 1).length;
+    const unseen = messages.filter(m => m.unread === 0).length;
     const uidNext = total > 0 ? Math.max(...messages.map(m => m.emailId)) + 1 : 1;
 
     const itemList = m[2].toUpperCase().split(/\s+/);
@@ -731,8 +731,8 @@ class ImapSession {
       }
 
       // Mark as seen if full body was requested and message is unread
-      if (implicitSeen && msg.unread === 1) {
-        msg.unread = 0; // optimistic local update
+      if (implicitSeen && msg.unread === 0) {
+        msg.unread = 1; // optimistic local update
         toMarkRead.push(msg.emailId);
       }
     }
@@ -757,7 +757,7 @@ class ImapSession {
    */
   _buildFetchItem(item, msg, raw, rawBuf) {
     const isDeleted = this.pendingDeletes.has(msg.emailId);
-    const isSeen = msg.unread === 0;
+    const isSeen = msg.unread === 1;
     const flagList = [
       ...(isSeen ? ['\\Seen'] : []),
       ...(isDeleted ? ['\\Deleted'] : []),
@@ -882,16 +882,16 @@ class ImapSession {
     for (const { seqNum, msg } of targets) {
       const op = operation.replace('.SILENT', '');
       if (op === 'FLAGS' || op === '+FLAGS') {
-        if (flags.includes('\\SEEN')) { msg.unread = 0; markRead.push(msg.emailId); }
+        if (flags.includes('\\SEEN')) { msg.unread = 1; markRead.push(msg.emailId); }
         if (flags.includes('\\DELETED')) this.pendingDeletes.add(msg.emailId);
       } else if (op === '-FLAGS') {
-        if (flags.includes('\\SEEN')) msg.unread = 1;
+        if (flags.includes('\\SEEN')) msg.unread = 0;
         if (flags.includes('\\DELETED')) this.pendingDeletes.delete(msg.emailId);
       }
 
       if (!silent) {
         const isDeleted = this.pendingDeletes.has(msg.emailId);
-        const isSeen = msg.unread === 0;
+        const isSeen = msg.unread === 1;
         const flagList = [
           ...(isSeen ? ['\\Seen'] : []),
           ...(isDeleted ? ['\\Deleted'] : []),
