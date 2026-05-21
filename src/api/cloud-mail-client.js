@@ -225,16 +225,21 @@ class CloudMailClient {
    *
    * @param {number} type  0 = received, 1 = sent
    * @param {number} [limit=500]  Safety cap on the total number of emails fetched
+   * @param {Object} [opts]
+   * @param {number} [opts.accountId]
+   * @param {number} [opts.allReceive] Defaults to 0 when accountId is provided, otherwise 1.
    * @returns {Promise<Array>} All email objects, newest first
    */
-  async fetchAllEmails(type, limit = 500) {
+  async fetchAllEmails(type, limit = 500, opts = {}) {
+    const { accountId, allReceive = accountId != null ? 0 : 1 } = opts;
     const all = [];
     let cursorId = null; // null = start from the newest
 
     while (all.length < limit) {
       const remaining = limit - all.length;
       const size = Math.min(50, remaining);
-      const params = { type, size, allReceive: 1 };
+      const params = { type, size, allReceive };
+      if (accountId != null) params.accountId = accountId;
       if (cursorId != null) params.emailId = cursorId;
 
       const body = await this._get('/email/list', params);

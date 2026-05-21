@@ -43,6 +43,7 @@ const {
   buildBodyStructure,
 } = require('../utils/mime-builder');
 const CloudMailClient = require('../api/cloud-mail-client');
+const { extractAccountAddresses } = require('../utils/account-addresses');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,15 +51,15 @@ const CloudMailClient = require('../api/cloud-mail-client');
 
 const CAPABILITIES = 'IMAP4rev1 LITERAL+ UIDPLUS IDLE MOVE SPECIAL-USE AUTH=PLAIN';
 
-/** Map well-known IMAP folder names to cloud-mail email types */
-const FOLDER_MAP = {
-  INBOX: 0,
-  SENT: 1,
-  'SENT MESSAGES': 1,
-  'SENT ITEMS': 1,
-  TRASH: 'trash',
-  'DELETED ITEMS': 'trash',
-  'DELETED MESSAGES': 'trash',
+/** Map built-in IMAP folder aliases to canonical mailbox descriptors */
+const BUILTIN_MAILBOX_MAP = {
+  INBOX: { key: 'INBOX', name: 'INBOX', type: 0 },
+  SENT: { key: 'SENT', name: 'Sent', type: 1 },
+  'SENT MESSAGES': { key: 'SENT', name: 'Sent', type: 1 },
+  'SENT ITEMS': { key: 'SENT', name: 'Sent', type: 1 },
+  TRASH: { key: 'TRASH', name: 'Trash', type: 'trash' },
+  'DELETED ITEMS': { key: 'TRASH', name: 'Trash', type: 'trash' },
+  'DELETED MESSAGES': { key: 'TRASH', name: 'Trash', type: 'trash' },
 };
 
 // ---------------------------------------------------------------------------
@@ -204,6 +205,12 @@ function decodeAuthPlain(encoded) {
   }
 }
 
+function parseMailboxName(raw) {
+  const s = String(raw || '').trim();
+  const quoted = s.match(/^"([^"]+)"$/);
+  return (quoted ? quoted[1] : s).trim();
+}
+
 // ---------------------------------------------------------------------------
 // ImapSession
 // ---------------------------------------------------------------------------
@@ -226,6 +233,7 @@ class ImapSession {
 
     /** cloud-mail type for selected folder (0=INBOX, 1=Sent, 'trash') */
     this.selectedType = null;
+    this.selectedMailboxKey = null;
 
     /**
      * Session-local Trash store.
@@ -269,6 +277,56 @@ class ImapSession {
   _ok(tag, msg) { this._send(`${tag} OK ${msg}`); }
   _no(tag, msg) { this._send(`${tag} NO ${msg}`); }
   _bad(tag, msg) { this._send(`${tag} BAD ${msg}`); }
+
+  async _listAddressMailboxes() {
+    let accounts = [];
+    try {
+      accounts = await this.client.listAccounts();
+    } catch (err) {
+      console.error('[IMAP] listAccounts failed:', err.message);
+    }
+
+    const seen = new Set();
+    const dynamic = [];
+    for (const account of accounts) {
+      if (!account || account.accountId == null) continue;
+      for (const addr of extractAccountAddresses(account)) {
+        const mailbox = `INBOX/${addr}`;
+        const key = mailbox.toUpperCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        dynamic.push({ key, name: mailbox, type: 0, accountId: account.accountId });
+      }
+    }
+
+    dynamic.sort((a, b) => a.name.localeCompare(b.name));
+    return dynamic;
+  }
+
+  async _resolveMailbox(mailboxName) {
+    const normalized = parseMailboxName(mailboxName);
+    if (!normalized) return null;
+
+    const upper = normalized.toUpperCase();
+    const builtin = BUILTIN_MAILBOX_MAP[upper];
+    if (builtin) return builtin;
+
+    if (!upper.startsWith('INBOX/')) return null;
+    const dynamic = await this._listAddressMailboxes();
+    return dynamic.find(box => box.key === upper) || null;
+  }
+
+  async _buildListMailboxes() {
+    const dynamic = await this._listAddressMailboxes();
+    const inboxAttrs = dynamic.length > 0 ? '(\\HasChildren)' : '(\\HasNoChildren)';
+    const list = [
+      { attrs: inboxAttrs, name: 'INBOX' },
+      ...dynamic.map(box => ({ attrs: '(\\HasNoChildren)', name: box.name })),
+      { attrs: '(\\HasNoChildren \\Sent)', name: 'Sent' },
+      { attrs: '(\\HasNoChildren \\Trash)', name: 'Trash' },
+    ];
+    return list;
+  }
 
   _onData(data) {
     this._buffer += data;
@@ -319,8 +377,8 @@ class ImapSession {
         case 'LOGOUT':     await this._cmdLogout(tag); break;
         case 'LOGIN':      await this._cmdLogin(tag, rest); break;
         case 'AUTHENTICATE': await this._cmdAuthenticate(tag, rest); break;
-        case 'LIST':       this._cmdList(tag, rest); break;
-        case 'LSUB':       this._cmdLsub(tag, rest); break;
+        case 'LIST':       await this._cmdList(tag, rest); break;
+        case 'LSUB':       await this._cmdLsub(tag, rest); break;
         case 'SELECT':     await this._cmdSelect(tag, rest, false); break;
         case 'EXAMINE':    await this._cmdSelect(tag, rest, true); break;
         case 'STATUS':     await this._cmdStatus(tag, rest); break;
@@ -464,29 +522,29 @@ class ImapSession {
   // LIST / LSUB
   // -------------------------------------------------------------------------
 
-  _cmdList(tag, args) {
+  async _cmdList(tag, args) {
     if (this.state === 'NOT_AUTHENTICATED') {
       this._no(tag, 'Not authenticated');
       return;
     }
 
-    // Parse: LIST "" "*"  or LIST "" "INBOX"
-    // We expose a fixed folder list regardless of the pattern
-    this._send('* LIST (\\HasNoChildren) "/" "INBOX"');
-    this._send('* LIST (\\HasNoChildren \\Sent) "/" "Sent"');
-    this._send('* LIST (\\HasNoChildren \\Trash) "/" "Trash"');
+    const mailboxes = await this._buildListMailboxes();
+    for (const mailbox of mailboxes) {
+      this._send(`* LIST ${mailbox.attrs} "/" ${q(mailbox.name)}`);
+    }
     this._ok(tag, 'LIST completed');
   }
 
-  _cmdLsub(tag) {
+  async _cmdLsub(tag) {
     if (this.state === 'NOT_AUTHENTICATED') {
       this._no(tag, 'Not authenticated');
       return;
     }
 
-    this._send('* LSUB (\\HasNoChildren) "/" "INBOX"');
-    this._send('* LSUB (\\HasNoChildren \\Sent) "/" "Sent"');
-    this._send('* LSUB (\\HasNoChildren \\Trash) "/" "Trash"');
+    const mailboxes = await this._buildListMailboxes();
+    for (const mailbox of mailboxes) {
+      this._send(`* LSUB ${mailbox.attrs} "/" ${q(mailbox.name)}`);
+    }
     this._ok(tag, 'LSUB completed');
   }
 
@@ -500,24 +558,25 @@ class ImapSession {
       return;
     }
 
-    // Strip surrounding quotes
-    const folderName = args.replace(/^["']|["']$/g, '').trim().toUpperCase();
-    const type = FOLDER_MAP[folderName];
-    if (type === undefined) {
+    const mailbox = await this._resolveMailbox(args);
+    if (!mailbox) {
       this._no(tag, `Mailbox does not exist: ${args}`);
       return;
     }
 
     this.state = 'SELECTED';
     this.readOnly = readOnly;
-    this.selectedType = type;
+    this.selectedType = mailbox.type;
+    this.selectedMailboxKey = mailbox.key;
     this.pendingDeletes.clear();
 
     // Fetch emails from cloud-mail (or use session-local Trash store)
-    if (type === 'trash') {
+    if (mailbox.type === 'trash') {
       this.messages = [...this.trashMessages];
     } else {
-      this.messages = await this.client.fetchAllEmails(type);
+      this.messages = await this.client.fetchAllEmails(mailbox.type, 500, {
+        accountId: mailbox.accountId,
+      });
       // Ensure oldest-to-newest order (ascending emailId) for IMAP sequence numbers
       this.messages.sort((a, b) => a.emailId - b.emailId);
     }
@@ -553,23 +612,25 @@ class ImapSession {
       return;
     }
 
-    const m = args.match(/^"?([^"\s]+)"?\s+\(([^)]+)\)/);
+    const m = args.match(/^"([^"]+)"\s+\(([^)]+)\)\s*$/) ||
+              args.match(/^(\S+)\s+\(([^)]+)\)\s*$/);
     if (!m) { this._bad(tag, 'Syntax: STATUS mailbox (items)'); return; }
 
-    const folderName = m[1].toUpperCase();
-    const type = FOLDER_MAP[folderName];
-    if (type === undefined) {
+    const mailbox = await this._resolveMailbox(m[1]);
+    if (!mailbox) {
       this._no(tag, `No such mailbox: ${m[1]}`);
       return;
     }
 
     let messages;
-    if (this.selectedType === type) {
+    if (this.selectedMailboxKey === mailbox.key) {
       messages = this.messages;
-    } else if (type === 'trash') {
+    } else if (mailbox.type === 'trash') {
       messages = this.trashMessages;
     } else {
-      messages = await this.client.fetchAllEmails(type);
+      messages = await this.client.fetchAllEmails(mailbox.type, 500, {
+        accountId: mailbox.accountId,
+      });
     }
 
     const total = messages.length;
@@ -1011,7 +1072,7 @@ class ImapSession {
     const m = args.match(/^(\S+)\s+"([^"]+)"\s*$/) ||
               args.match(/^(\S+)\s+(\S+)\s*$/);
     if (!m) return null;
-    return { seqOrUidSet: m[1], destName: m[2].toUpperCase() };
+    return { seqOrUidSet: m[1], destName: m[2] };
   }
 
   /**
@@ -1034,9 +1095,8 @@ class ImapSession {
     if (!parsed) { this._bad(tag, 'Syntax: COPY sequence mailbox'); return; }
 
     const { seqOrUidSet, destName } = parsed;
-    const destType = FOLDER_MAP[destName];
-
-    if (destType === undefined) {
+    const destMailbox = await this._resolveMailbox(destName);
+    if (!destMailbox) {
       this._no(tag, `[TRYCREATE] No such mailbox: ${destName}`);
       return;
     }
@@ -1048,7 +1108,7 @@ class ImapSession {
       return;
     }
 
-    if (destType === 'trash') {
+    if (destMailbox.type === 'trash') {
       const srcUids = [];
       const dstUids = [];
       for (const { msg } of targets) {
@@ -1095,9 +1155,8 @@ class ImapSession {
     if (!parsed) { this._bad(tag, 'Syntax: MOVE sequence mailbox'); return; }
 
     const { seqOrUidSet, destName } = parsed;
-    const destType = FOLDER_MAP[destName];
-
-    if (destType === undefined) {
+    const destMailbox = await this._resolveMailbox(destName);
+    if (!destMailbox) {
       this._no(tag, `[TRYCREATE] No such mailbox: ${destName}`);
       return;
     }
@@ -1109,7 +1168,7 @@ class ImapSession {
       return;
     }
 
-    if (destType === 'trash') {
+    if (destMailbox.type === 'trash') {
       const srcUids = [];
       const dstUids = [];
       for (const { msg } of targets) {
@@ -1169,6 +1228,7 @@ class ImapSession {
 
     this.state = 'AUTHENTICATED';
     this.selectedType = null;
+    this.selectedMailboxKey = null;
     this.messages = [];
     this._ok(tag, 'CLOSE completed');
   }
