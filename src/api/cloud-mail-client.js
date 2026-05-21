@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const API_PATH_SUFFIX = '/api';
 
 /**
  * HTTP client that wraps the cloud-mail REST API.
@@ -12,9 +13,11 @@ class CloudMailClient {
    */
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
-    this.apiBaseUrl = this.baseUrl.endsWith('/api') ? this.baseUrl : `${this.baseUrl}/api`;
-    this.fallbackBaseUrl = this.baseUrl.endsWith('/api')
-      ? (this.baseUrl.slice(0, -4) || this.baseUrl)
+    this.apiBaseUrl = this.baseUrl.endsWith(API_PATH_SUFFIX)
+      ? this.baseUrl
+      : `${this.baseUrl}${API_PATH_SUFFIX}`;
+    this.fallbackBaseUrl = this.baseUrl.endsWith(API_PATH_SUFFIX)
+      ? (this.baseUrl.slice(0, -API_PATH_SUFFIX.length) || this.baseUrl)
       : this.baseUrl;
     this.token = null;
   }

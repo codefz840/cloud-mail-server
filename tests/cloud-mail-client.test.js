@@ -22,7 +22,7 @@ describe('CloudMailClient API path fallback', () => {
       .mockResolvedValueOnce({ data: { code: 200, data: { token: 'jwt-token' } } });
 
     const client = new CloudMailClient('https://mail.example.com');
-    const token = await client.login('admin@efze.ro', 'secret');
+    const token = await client.login('admin@example.com', 'secret');
 
     expect(token).toBe('jwt-token');
     expect(axios).toHaveBeenCalledTimes(2);
@@ -46,7 +46,7 @@ describe('CloudMailClient API path fallback', () => {
     axios.mockRejectedValueOnce(httpError(401));
 
     const client = new CloudMailClient('https://mail.example.com');
-    await expect(client.login('admin@efze.ro', 'bad-password')).rejects.toThrow('HTTP 401');
+    await expect(client.login('admin@example.com', 'bad-password')).rejects.toThrow('HTTP 401');
     expect(axios).toHaveBeenCalledTimes(1);
   });
 
@@ -83,7 +83,7 @@ describe('CloudMailClient API path fallback', () => {
     axios.mockResolvedValueOnce({ data: { code: 200, data: { token: 'jwt-token' } } });
 
     const client = new CloudMailClient('https://mail.example.com/api');
-    await client.login('admin@efze.ro', 'secret');
+    await client.login('admin@example.com', 'secret');
 
     expect(axios).toHaveBeenCalledTimes(1);
     expect(axios).toHaveBeenCalledWith(
