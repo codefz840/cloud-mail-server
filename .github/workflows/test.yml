@@ -28,12 +28,15 @@ jobs:
 
       - name: Configure DNS resolver
         run: |
+          use_resolv_conf_fallback=true
+
           if command -v resolvectl >/dev/null 2>&1; then
             dns_link="$(ip route | awk '/^default/ {print $5; exit}')"
             if [ -n "$dns_link" ]; then
               echo "Configuring resolvectl on link: $dns_link"
               if sudo resolvectl dns "$dns_link" 1.1.1.1 1.0.0.1; then
                 sudo resolvectl flush-caches
+                use_resolv_conf_fallback=false
               else
                 echo "resolvectl DNS configuration failed; using /etc/resolv.conf fallback"
               fi
@@ -44,7 +47,7 @@ jobs:
             echo "resolvectl not available; using /etc/resolv.conf fallback"
           fi
 
-          if ! grep -q '^nameserver 1.1.1.1$' /etc/resolv.conf; then
+          if [ "$use_resolv_conf_fallback" = "true" ] && ! grep -q '^nameserver 1.1.1.1$' /etc/resolv.conf; then
             tmp_resolv="$(mktemp)"
             {
               echo 'nameserver 1.1.1.1'
