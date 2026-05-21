@@ -14,14 +14,13 @@ class CloudMailClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     const hasApiSuffix = this.baseUrl.endsWith(API_PATH_SUFFIX);
-    const strippedBase = hasApiSuffix
-      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
-      : this.baseUrl;
     // Prefer modern worker routes under /api.
     this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
     // Fallback for deployments exposing legacy root routes.
-    this.fallbackBaseUrl = hasApiSuffix ? strippedBase : this.baseUrl;
-    this.shouldAttemptFallback = this.fallbackBaseUrl !== this.apiBaseUrl;
+    this.fallbackBaseUrl = hasApiSuffix
+      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
+      : this.baseUrl;
+    this.fallbackEnabled = this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }
 
@@ -35,7 +34,7 @@ class CloudMailClient {
 
   _shouldRetryWithFallback(err) {
     const status = err && err.response && err.response.status;
-    return (status === 404 || status === 405) && this.shouldAttemptFallback;
+    return (status === 404 || status === 405) && this.fallbackEnabled;
   }
 
   async _request(method, path, { params, data, includeAuth = true } = {}) {
@@ -54,7 +53,7 @@ class CloudMailClient {
       return await makeRequest(this.apiBaseUrl);
     } catch (err) {
       if (!this._shouldRetryWithFallback(err)) throw err;
-      return makeRequest(this.fallbackBaseUrl);
+      return await makeRequest(this.fallbackBaseUrl);
     }
   }
 
