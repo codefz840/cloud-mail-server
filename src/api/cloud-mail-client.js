@@ -18,7 +18,7 @@ class CloudMailClient {
       ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
       : this.baseUrl;
     this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
-    this.fallbackBaseUrl = hasApiSuffix ? (strippedBase || this.baseUrl) : this.baseUrl;
+    this.fallbackBaseUrl = hasApiSuffix ? strippedBase : this.baseUrl;
     this.shouldAttemptFallback = this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }

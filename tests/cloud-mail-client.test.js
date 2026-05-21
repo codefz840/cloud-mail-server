@@ -46,7 +46,9 @@ describe('CloudMailClient API path fallback', () => {
     axios.mockRejectedValueOnce(httpError(401));
 
     const client = new CloudMailClient('https://mail.example.com');
-    await expect(client.login('admin@example.com', 'bad-password')).rejects.toThrow('HTTP 401');
+    await expect(client.login('admin@example.com', 'bad-password')).rejects.toMatchObject({
+      response: { status: 401 },
+    });
     expect(axios).toHaveBeenCalledTimes(1);
   });
 
