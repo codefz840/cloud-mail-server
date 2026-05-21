@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const API_PATH_SUFFIX = '/api';
 
 /**
  * HTTP client that wraps the cloud-mail REST API.
@@ -12,6 +13,14 @@ class CloudMailClient {
    */
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
+    const hasApiSuffix = this.baseUrl.endsWith(API_PATH_SUFFIX);
+    // Prefer modern worker routes under /api.
+    this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
+    // Fallback for deployments exposing legacy root routes.
+    this.fallbackBaseUrl = hasApiSuffix
+      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
+      : this.baseUrl;
+    this.fallbackEnabled = this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }
 
@@ -38,13 +47,13 @@ class CloudMailClient {
       parts.push(`status ${status}`);
     }
 
-    const data = error.response && error.response.data;
-    if (data !== undefined) {
-      if (typeof data === 'string') {
-        parts.push(data);
+    const responseData = error.response && error.response.data;
+    if (responseData !== undefined) {
+      if (typeof responseData === 'string') {
+        parts.push(responseData);
       } else {
         try {
-          parts.push(JSON.stringify(data));
+          parts.push(JSON.stringify(responseData));
         } catch (_) {
           parts.push('[unserializable response body]');
         }
@@ -54,42 +63,53 @@ class CloudMailClient {
     return new Error(`${requestDescription} failed: ${parts.join(' | ') || 'request error'}`);
   }
 
-  async _request(requestDescription, fn) {
+  _shouldRetryWithFallback(error) {
+    const status = error && error.response && error.response.status;
+    return (status === 404 || status === 405) && this.fallbackEnabled;
+  }
+
+  async _request(method, path, { params, data, includeAuth = true } = {}) {
+    const requestDescription = `${method.toUpperCase()} ${path}`;
+    const makeRequest = async (baseUrl) => {
+      const res = await axios({
+        method,
+        url: `${baseUrl}${path}`,
+        headers: includeAuth ? this._authHeaders() : undefined,
+        params,
+        data,
+      });
+      return res.data;
+    };
+
     try {
-      return await fn();
+      return await makeRequest(this.apiBaseUrl);
     } catch (error) {
+      if (this._shouldRetryWithFallback(error)) {
+        try {
+          return await makeRequest(this.fallbackBaseUrl);
+        } catch (fallbackError) {
+          throw this._buildRequestError(requestDescription, fallbackError);
+        }
+      }
+
       throw this._buildRequestError(requestDescription, error);
     }
   }
 
   async _get(path, params = {}) {
-    const res = await this._request(`GET ${path}`, () => axios.get(`${this.baseUrl}${path}`, {
-      headers: this._authHeaders(),
-      params,
-    }));
-    return res.data;
+    return this._request('get', path, { params });
   }
 
   async _post(path, data = {}) {
-    const res = await this._request(`POST ${path}`, () => axios.post(`${this.baseUrl}${path}`, data, {
-      headers: this._authHeaders(),
-    }));
-    return res.data;
+    return this._request('post', path, { data });
   }
 
   async _put(path, data = {}) {
-    const res = await this._request(`PUT ${path}`, () => axios.put(`${this.baseUrl}${path}`, data, {
-      headers: this._authHeaders(),
-    }));
-    return res.data;
+    return this._request('put', path, { data });
   }
 
   async _delete(path, params = {}) {
-    const res = await this._request(`DELETE ${path}`, () => axios.delete(`${this.baseUrl}${path}`, {
-      headers: this._authHeaders(),
-      params,
-    }));
-    return res.data;
+    return this._request('delete', path, { params });
   }
 
   // ---------------------------------------------------------------------------
@@ -103,8 +123,10 @@ class CloudMailClient {
    * @returns {Promise<string>} JWT token
    */
   async login(email, password) {
-    const res = await this._request('POST /login', () => axios.post(`${this.baseUrl}/login`, { email, password }));
-    const body = res.data;
+    const body = await this._request('post', '/login', {
+      data: { email, password },
+      includeAuth: false,
+    });
     if (!body || body.code !== 200 || !body.data || !body.data.token) {
       throw new Error('Login failed: ' + JSON.stringify(body));
     }
