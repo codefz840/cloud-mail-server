@@ -73,7 +73,7 @@ class CloudMailClient {
   async _post(path, data = {}) {
     const res = await this._request(`POST ${path}`, () => axios.post(`${this.baseUrl}${path}`, data, {
       headers: this._authHeaders(),
-    });
+    }));
     return res.data;
   }
 
@@ -88,7 +88,7 @@ class CloudMailClient {
     const res = await this._request(`DELETE ${path}`, () => axios.delete(`${this.baseUrl}${path}`, {
       headers: this._authHeaders(),
       params,
-    });
+    }));
     return res.data;
   }
 
