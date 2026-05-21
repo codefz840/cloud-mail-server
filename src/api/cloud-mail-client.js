@@ -13,12 +13,13 @@ class CloudMailClient {
    */
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
-    this.apiBaseUrl = this.baseUrl.endsWith(API_PATH_SUFFIX)
-      ? this.baseUrl
-      : `${this.baseUrl}${API_PATH_SUFFIX}`;
-    this.fallbackBaseUrl = this.baseUrl.endsWith(API_PATH_SUFFIX)
-      ? (this.baseUrl.slice(0, -API_PATH_SUFFIX.length) || this.baseUrl)
+    const hasApiSuffix = this.baseUrl.endsWith(API_PATH_SUFFIX);
+    const strippedBase = hasApiSuffix
+      ? this.baseUrl.slice(0, -API_PATH_SUFFIX.length)
       : this.baseUrl;
+    this.apiBaseUrl = hasApiSuffix ? this.baseUrl : `${this.baseUrl}${API_PATH_SUFFIX}`;
+    this.fallbackBaseUrl = hasApiSuffix ? (strippedBase || this.baseUrl) : this.baseUrl;
+    this.shouldAttemptFallback = this.fallbackBaseUrl !== this.apiBaseUrl;
     this.token = null;
   }
 
@@ -32,7 +33,7 @@ class CloudMailClient {
 
   _shouldRetryWithFallback(err) {
     const status = err && err.response && err.response.status;
-    return (status === 404 || status === 405) && this.fallbackBaseUrl !== this.apiBaseUrl;
+    return (status === 404 || status === 405) && this.shouldAttemptFallback;
   }
 
   async _request(method, path, { params, data, includeAuth = true } = {}) {
