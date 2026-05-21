@@ -46,13 +46,13 @@ class CloudMailClient {
     }
 
     const status = error.response && error.response.status;
-    const statusText = String(status);
+    const statusCode = String(status);
     const mentionsStatus = Boolean(
       status &&
       error.message &&
       (
-        error.message.includes(`HTTP ${statusText}`) ||
-        error.message.toLowerCase().includes(`status ${statusText}`)
+        error.message.includes(`HTTP ${statusCode}`) ||
+        error.message.toLowerCase().includes(`status ${statusCode}`)
       )
     );
     if (status && !mentionsStatus) {
@@ -90,6 +90,7 @@ class CloudMailClient {
         params,
         data,
       });
+      // Cloud-mail responses use the API envelope shape { code, data, ... }.
       return res.data;
     };
 
